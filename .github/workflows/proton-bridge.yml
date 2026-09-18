@@ -7,7 +7,7 @@ on:
 
 jobs:
   proton-bridge:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
@@ -26,12 +26,12 @@ jobs:
           echo "Proton share URL is configured."
 
       - name: Checkout bridge repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Install Playwright
         run: |
@@ -190,8 +190,17 @@ jobs:
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
           await sleep(8000);
 
-          console.log('Page title:', await page.title());
-          console.log((await page.locator('body').innerText()).slice(0, 5000));
+          const pageTitle = await page.title();
+          const pageBody = await page.locator('body').innerText();
+
+          console.log('Page title:', pageTitle);
+          console.log(pageBody.slice(0, 5000));
+
+          const titleFileName = pageTitle
+            .replace(/\s*[-|]\s*Proton Drive\s*$/i, '')
+            .trim();
+
+          console.log('Filename candidate from page title:', titleFileName || '(none)');
 
           const buttons = page.locator('button, a, [role="button"]').filter({ hasText: /download/i });
           const count = await buttons.count();
@@ -322,16 +331,20 @@ jobs:
             throw new Error(capture?.error || 'No usable Proton blob was captured.');
           }
 
-          const safeName = String(capture.name || 'proton-download')
-            .replace(/[^a-zA-Z0-9._-]/g, '_');
+          const discoveredName = capture.name || titleFileName || 'proton-download.bin';
+          const safeName = String(discoveredName)
+            .replace(/[^a-zA-Z0-9._ -]/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim();
 
-          const destination = path.join(outputDir, safeName);
+          const finalName = safeName || 'proton-download.bin';
+          const destination = path.join(outputDir, finalName);
           const bytes = Buffer.from(capture.base64, 'base64');
 
           fs.writeFileSync(destination, bytes);
 
           console.log('SUCCESS: captured Proton download');
-          console.log('Filename:', safeName);
+          console.log('Filename:', finalName);
           console.log('MIME type:', capture.mime);
           console.log('Bytes:', bytes.length);
           console.log('Saved to:', destination);
@@ -347,7 +360,7 @@ jobs:
 
       - name: Upload bridge artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: proton-bridge-output
           path: bridge-output/
