@@ -33,24 +33,125 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install Proton public-share downloader
+      - name: Install Playwright
         run: |
-          npm install --no-save pdown
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
 
       - name: Download from Proton public share
         run: |
+          rm -rf bridge-output
           mkdir -p bridge-output
-          echo "Downloading the Proton public share..."
-          npx --yes pdown dl "$PROTON_SHARE_URL" -o bridge-output \
-            --puppeteerOptions '{"executablePath":"/usr/bin/google-chrome","args":["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage"]}'
-          echo
-          echo "Downloaded files:"
-          find bridge-output -maxdepth 2 -type f -printf '%p (%s bytes)\n'
 
-          if ! find bridge-output -maxdepth 2 -type f -print -quit | grep -q .; then
-            echo "ERROR: Proton downloader produced no files."
-            exit 1
-          fi
+          cat > bridge-download.mjs <<'EOF'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const url = process.env.PROTON_SHARE_URL;
+          const outputDir = path.resolve('bridge-output');
+
+          if (!url) throw new Error('PROTON_SHARE_URL is missing');
+
+          const browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+          });
+
+          const context = await browser.newContext({
+            acceptDownloads: true,
+            downloadsPath: outputDir
+          });
+
+          const page = await context.newPage();
+
+          const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+          console.log('Opening Proton public share...');
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
+          await sleep(8000);
+
+          console.log('Page title:', await page.title());
+          console.log('Initial page text:');
+          console.log((await page.locator('body').innerText()).slice(0, 5000));
+
+          const buttons = page.locator('button, a, [role="button"]').filter({ hasText: /download/i });
+          const count = await buttons.count();
+          console.log('Download controls found:', count);
+
+          for (let i = 0; i < count; i++) {
+            const info = await buttons.nth(i).evaluate(el => ({
+              tag: el.tagName,
+              text: el.textContent?.trim(),
+              aria: el.getAttribute('aria-label'),
+              testid: el.getAttribute('data-testid'),
+              href: el.getAttribute('href')
+            }));
+            console.log('Download control', i, JSON.stringify(info));
+          }
+
+          if (count === 0) {
+            await page.screenshot({ path: path.join(outputDir, 'proton-page-no-download.png'), fullPage: true });
+            throw new Error('No Download control was found.');
+          }
+
+          const target = buttons.last();
+          console.log('Clicking the last Download control...');
+
+          // Proton's current web UI starts a transfer inside the page rather than
+          // necessarily emitting a native browser download event.
+          await target.click({ timeout: 30000 });
+          await sleep(5000);
+
+          console.log('Page text after click:');
+          console.log((await page.locator('body').innerText()).slice(0, 7000));
+
+          // Give Proton plenty of time to finish the encrypted transfer.
+          let stableCount = 0;
+          let previousFiles = '';
+
+          for (let i = 0; i < 180; i++) {
+            const files = fs.readdirSync(outputDir)
+              .filter(name => !name.endsWith('.png'))
+              .map(name => {
+                const full = path.join(outputDir, name);
+                const st = fs.statSync(full);
+                return name + ':' + st.size;
+              })
+              .sort()
+              .join('|');
+
+            if (files !== previousFiles) {
+              console.log('Output directory:', files || '(empty)');
+              previousFiles = files;
+              stableCount = 0;
+            } else {
+              stableCount++;
+            }
+
+            if (files && stableCount >= 4) break;
+            await sleep(1000);
+          }
+
+          const finalFiles = fs.readdirSync(outputDir)
+            .filter(name => !name.endsWith('.png'));
+
+          if (finalFiles.length === 0) {
+            await page.screenshot({ path: path.join(outputDir, 'proton-page-after-click.png'), fullPage: true });
+            fs.writeFileSync(path.join(outputDir, 'proton-page-after-click.txt'), await page.locator('body').innerText());
+            throw new Error('Proton transfer did not produce a downloaded file.');
+          }
+
+          console.log('Downloaded files:');
+          for (const name of finalFiles) {
+            const full = path.join(outputDir, name);
+            console.log(full, fs.statSync(full).size, 'bytes');
+          }
+
+          await browser.close();
+          EOF
+
+          node bridge-download.mjs
 
       - name: Upload bridge artifact
         if: always()
