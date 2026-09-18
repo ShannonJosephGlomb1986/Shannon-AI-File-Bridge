@@ -47,7 +47,6 @@ jobs:
           mkdir -p bridge-output
           cat > bridge-download.mjs <<'EOF'
           import { chromium } from 'playwright';
-          import fs from 'fs';
 
           const url = process.env.PROTON_SHARE_URL;
           if (!url) throw new Error('PROTON_SHARE_URL is missing');
@@ -73,8 +72,24 @@ jobs:
             throw new Error('No Download control was found on the Proton share page.');
           }
 
+          for (let i = 0; i < count; i++) {
+            const info = await candidates.nth(i).evaluate(el => ({
+              tag: el.tagName,
+              text: el.textContent?.trim(),
+              href: el.getAttribute('href'),
+              role: el.getAttribute('role'),
+              aria: el.getAttribute('aria-label')
+            }));
+            console.log('Download control', i, JSON.stringify(info));
+          }
+
+          // Proton currently renders two Download controls on this public-file page.
+          // The second (last) control is the file download action.
+          const target = candidates.last();
+
+          console.log('Clicking the last Download control...');
           const downloadPromise = page.waitForEvent('download', { timeout: 120000 });
-          await candidates.first().click();
+          await target.click();
           const download = await downloadPromise;
 
           const filename = download.suggestedFilename() || 'proton-download';
