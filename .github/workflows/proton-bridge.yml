@@ -41,7 +41,8 @@ jobs:
         run: |
           mkdir -p bridge-output
           echo "Downloading the Proton public share..."
-          npx --yes pdown dl "$PROTON_SHARE_URL" -o bridge-output
+          npx --yes pdown dl "$PROTON_SHARE_URL" -o bridge-output \
+            --puppeteerOptions '{"executablePath":"/usr/bin/google-chrome","args":["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage"]}'
           echo
           echo "Downloaded files:"
           find bridge-output -maxdepth 2 -type f -printf '%p (%s bytes)\n'
