@@ -333,8 +333,9 @@ jobs:
 
           const discoveredName = capture.name || titleFileName || 'proton-download.bin';
           const safeName = String(discoveredName)
-            .replace(/[^a-zA-Z0-9._ -]/g, '_')
+            .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
             .replace(/\s+/g, ' ')
+            .replace(/[. ]+$/, '')
             .trim();
 
           const finalName = safeName || 'proton-download.bin';
