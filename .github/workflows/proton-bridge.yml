@@ -42,8 +42,6 @@ jobs:
         run: |
           rm -rf bridge-output
           mkdir -p bridge-output
-          rm -rf "$HOME/Downloads"
-          mkdir -p "$HOME/Downloads"
 
           cat > bridge-download.mjs <<'EOF'
           import { chromium } from 'playwright';
@@ -52,7 +50,6 @@ jobs:
 
           const url = process.env.PROTON_SHARE_URL;
           const outputDir = path.resolve('bridge-output');
-          const downloadsDir = path.join(process.env.HOME || '/home/runner', 'Downloads');
 
           if (!url) throw new Error('PROTON_SHARE_URL is missing');
 
@@ -61,12 +58,54 @@ jobs:
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
           });
 
-          const context = await browser.newContext({
-            acceptDownloads: true,
-            downloadsPath: downloadsDir
+          const context = await browser.newContext({ acceptDownloads: true });
+          const page = await context.newPage();
+
+          // Proton Drive's web client completes the encrypted download in the
+          // browser and can hand the decrypted result to a blob URL rather than
+          // the native browser download manager. Capture that blob directly.
+          await page.addInitScript(() => {
+            const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+            const originalRevokeObjectURL = URL.revokeObjectURL.bind(URL);
+
+            window.__protonBridge = {
+              blobs: new Map(),
+              clicks: []
+            };
+
+            URL.createObjectURL = (object) => {
+              const value = originalCreateObjectURL(object);
+              try {
+                if (object instanceof Blob) {
+                  window.__protonBridge.blobs.set(value, object);
+                }
+              } catch {}
+              return value;
+            };
+
+            // Keep captured blobs alive until Node has copied their bytes.
+            URL.revokeObjectURL = (value) => {
+              try {
+                if (window.__protonBridge?.blobs?.has(value)) return;
+              } catch {}
+              return originalRevokeObjectURL(value);
+            };
+
+            const originalAnchorClick = HTMLAnchorElement.prototype.click;
+            HTMLAnchorElement.prototype.click = function() {
+              try {
+                const href = this.href || '';
+                if (href.startsWith('blob:') && window.__protonBridge) {
+                  window.__protonBridge.clicks.push({
+                    href,
+                    download: this.download || ''
+                  });
+                }
+              } catch {}
+              return originalAnchorClick.call(this);
+            };
           });
 
-          const page = await context.newPage();
           const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
           console.log('Opening Proton public share...');
@@ -99,71 +138,77 @@ jobs:
 
           console.log('Clicking the file Download control...');
           await target.click({ timeout: 30000 });
-          await sleep(5000);
 
-          console.log('Page text after click:');
-          console.log((await page.locator('body').innerText()).slice(0, 7000));
-
-          // Wait until the Proton UI reports the transfer as complete.
+          // Wait for Proton itself to report that the decrypted transfer finished.
           let transferComplete = false;
-          for (let i = 0; i < 120; i++) {
+          for (let i = 0; i < 180; i++) {
             const body = await page.locator('body').innerText();
+
             if (/1 of 1 transfers completed/i.test(body) && /Downloaded/i.test(body)) {
               transferComplete = true;
               console.log('Proton reports: transfer completed and file downloaded.');
               break;
             }
+
             await sleep(1000);
           }
 
-          if (!transferComplete) {
-            console.log('Proton did not report completion within the expected time.');
-          }
+          // Give the download UI a moment to create/click its blob URL.
+          await sleep(3000);
 
-          // Wait for an actual filesystem object to appear in the configured
-          // Playwright download directory. Do not treat page text alone as a file.
-          let found = [];
+          const capture = await page.evaluate(async () => {
+            const bridge = window.__protonBridge;
+            if (!bridge || !bridge.clicks?.length) return null;
 
-          for (let i = 0; i < 60 && found.length === 0; i++) {
-            if (fs.existsSync(downloadsDir)) {
-              found = fs.readdirSync(downloadsDir)
-                .map(name => path.join(downloadsDir, name))
-                .filter(full => fs.existsSync(full) && fs.statSync(full).isFile())
-                .filter(full => {
-                  const name = path.basename(full);
-                  return !name.endsWith('.crdownload') &&
-                         !name.endsWith('.tmp') &&
-                         !name.endsWith('.part');
-                });
+            // Prefer the most recent blob click.
+            const click = bridge.clicks[bridge.clicks.length - 1];
+            const blob = bridge.blobs.get(click.href);
+
+            if (!blob) {
+              return { error: 'A blob URL was clicked, but its Blob object was not captured.' };
             }
 
-            if (found.length) break;
-            await sleep(1000);
-          }
+            const buffer = await blob.arrayBuffer();
+            const bytes = new Uint8Array(buffer);
 
-          console.log('Playwright downloads directory:', downloadsDir);
-          console.log('Files found there:', found);
+            // Base64 lets the browser hand arbitrary binary bytes back to Node.
+            let binary = '';
+            const chunkSize = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+              binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+            }
 
-          if (found.length === 0) {
-            await page.screenshot({ path: path.join(outputDir, 'proton-page-after-click.png'), fullPage: true });
+            return {
+              name: click.download || 'proton-download',
+              mime: blob.type || 'application/octet-stream',
+              size: bytes.length,
+              base64: btoa(binary)
+            };
+          });
+
+          if (!capture || capture.error) {
+            await page.screenshot({ path: path.join(outputDir, 'proton-page-capture-failed.png'), fullPage: true });
             fs.writeFileSync(
-              path.join(outputDir, 'proton-page-after-click.txt'),
-              await page.locator('body').innerText()
+              path.join(outputDir, 'proton-page-capture-failed.txt'),
+              JSON.stringify(capture, null, 2)
             );
-            throw new Error('Proton reported the transfer completed, but Playwright did not expose the downloaded file.');
+            throw new Error(capture?.error || 'No blob download was captured from Proton.');
           }
 
-          found.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-          const source = found[0];
-          const destination = path.join(outputDir, path.basename(source));
+          const safeName = String(capture.name).replace(/[^a-zA-Z0-9._-]/g, '_');
+          const destination = path.join(outputDir, safeName);
+          const bytes = Buffer.from(capture.base64, 'base64');
 
-          fs.copyFileSync(source, destination);
+          fs.writeFileSync(destination, bytes);
 
-          const size = fs.statSync(destination).size;
-          console.log('SUCCESS: collected downloaded file:', destination, size, 'bytes');
+          console.log('SUCCESS: captured Proton decrypted blob');
+          console.log('Filename:', safeName);
+          console.log('MIME type:', capture.mime);
+          console.log('Bytes:', bytes.length);
+          console.log('Saved to:', destination);
 
-          if (size === 0) {
-            throw new Error('Downloaded file is empty.');
+          if (bytes.length === 0) {
+            throw new Error('Captured Proton file is empty.');
           }
 
           await browser.close();
