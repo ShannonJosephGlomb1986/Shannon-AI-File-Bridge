@@ -21,94 +21,41 @@ jobs:
           if [ -z "$PROTON_SHARE_URL" ]; then
             echo "PROTON_SHARE_URL is not configured yet."
             echo "Add it under Settings > Secrets and variables > Actions."
-            exit 0
+            exit 1
           fi
           echo "Proton share URL is configured."
 
       - name: Checkout bridge repository
-        if: env.PROTON_SHARE_URL != ''
         uses: actions/checkout@v4
 
       - name: Set up Node
-        if: env.PROTON_SHARE_URL != ''
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Install Playwright
-        if: env.PROTON_SHARE_URL != ''
+      - name: Install Proton public-share downloader
         run: |
-          npm install --no-save playwright
-          npx playwright install --with-deps chromium
+          npm install --no-save pdown
 
       - name: Download from Proton public share
-        if: env.PROTON_SHARE_URL != ''
         run: |
           mkdir -p bridge-output
-          cat > bridge-download.mjs <<'EOF'
-          import { chromium } from 'playwright';
+          echo "Downloading the Proton public share..."
+          npx --yes pdown dl "$PROTON_SHARE_URL" -o bridge-output
+          echo
+          echo "Downloaded files:"
+          find bridge-output -maxdepth 2 -type f -printf '%p (%s bytes)\n'
 
-          const url = process.env.PROTON_SHARE_URL;
-          if (!url) throw new Error('PROTON_SHARE_URL is missing');
-
-          const browser = await chromium.launch({ headless: true });
-          const context = await browser.newContext({ acceptDownloads: true });
-          const page = await context.newPage();
-
-          console.log('Opening Proton share page...');
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-          await page.waitForTimeout(8000);
-
-          console.log('Page title:', await page.title());
-          console.log('Visible text preview:');
-          console.log((await page.locator('body').innerText()).slice(0, 4000));
-
-          const candidates = page.locator('button, a, [role="button"]').filter({ hasText: /download/i });
-          const count = await candidates.count();
-          console.log('Download controls found:', count);
-
-          if (count === 0) {
-            await page.screenshot({ path: 'bridge-output/proton-page.png', fullPage: true });
-            throw new Error('No Download control was found on the Proton share page.');
-          }
-
-          for (let i = 0; i < count; i++) {
-            const info = await candidates.nth(i).evaluate(el => ({
-              tag: el.tagName,
-              text: el.textContent?.trim(),
-              href: el.getAttribute('href'),
-              role: el.getAttribute('role'),
-              aria: el.getAttribute('aria-label')
-            }));
-            console.log('Download control', i, JSON.stringify(info));
-          }
-
-          // Proton currently renders two Download controls on this public-file page.
-          // The second (last) control is the file download action.
-          const target = candidates.last();
-
-          console.log('Clicking the last Download control...');
-          const downloadPromise = page.waitForEvent('download', { timeout: 120000 });
-          await target.click();
-          const download = await downloadPromise;
-
-          const filename = download.suggestedFilename() || 'proton-download';
-          const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-          const destination = 'bridge-output/' + safeName;
-
-          await download.saveAs(destination);
-          console.log('Downloaded:', destination);
-
-          await browser.close();
-          EOF
-
-          node bridge-download.mjs
+          if ! find bridge-output -maxdepth 2 -type f -print -quit | grep -q .; then
+            echo "ERROR: Proton downloader produced no files."
+            exit 1
+          fi
 
       - name: Upload bridge artifact
-        if: env.PROTON_SHARE_URL != ''
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: proton-bridge-output
           path: bridge-output/
           retention-days: 7
-          if-no-files-found: error
+          if-no-files-found: warn
