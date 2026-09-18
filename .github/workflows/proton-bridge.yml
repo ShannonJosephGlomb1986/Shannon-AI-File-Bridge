@@ -61,16 +61,26 @@ jobs:
           const context = await browser.newContext({ acceptDownloads: true });
           const page = await context.newPage();
 
-          // Proton Drive's web client completes the encrypted download in the
-          // browser and can hand the decrypted result to a blob URL rather than
-          // the native browser download manager. Capture that blob directly.
           await page.addInitScript(() => {
             const originalCreateObjectURL = URL.createObjectURL.bind(URL);
             const originalRevokeObjectURL = URL.revokeObjectURL.bind(URL);
+            const originalOpen = window.open.bind(window);
 
             window.__protonBridge = {
               blobs: new Map(),
-              clicks: []
+              blobUrls: new Set(),
+              events: []
+            };
+
+            const rememberBlobUrl = (value, meta = {}) => {
+              if (typeof value === 'string' && value.startsWith('blob:')) {
+                window.__protonBridge.blobUrls.add(value);
+                window.__protonBridge.events.push({
+                  type: 'blob-url',
+                  url: value,
+                  ...meta
+                });
+              }
             };
 
             URL.createObjectURL = (object) => {
@@ -80,10 +90,10 @@ jobs:
                   window.__protonBridge.blobs.set(value, object);
                 }
               } catch {}
+              rememberBlobUrl(value, { source: 'createObjectURL' });
               return value;
             };
 
-            // Keep captured blobs alive until Node has copied their bytes.
             URL.revokeObjectURL = (value) => {
               try {
                 if (window.__protonBridge?.blobs?.has(value)) return;
@@ -91,19 +101,87 @@ jobs:
               return originalRevokeObjectURL(value);
             };
 
+            window.open = function(value, target, features) {
+              rememberBlobUrl(value, { source: 'window.open' });
+              return originalOpen(value, target, features);
+            };
+
             const originalAnchorClick = HTMLAnchorElement.prototype.click;
             HTMLAnchorElement.prototype.click = function() {
+              rememberBlobUrl(this.href, {
+                source: 'anchor.click',
+                download: this.download || ''
+              });
+              return originalAnchorClick.call(this);
+            };
+
+            document.addEventListener('click', (event) => {
               try {
-                const href = this.href || '';
-                if (href.startsWith('blob:') && window.__protonBridge) {
-                  window.__protonBridge.clicks.push({
-                    href,
-                    download: this.download || ''
+                const eventPath = event.composedPath ? event.composedPath() : [];
+                for (const node of eventPath) {
+                  if (node instanceof HTMLAnchorElement) {
+                    rememberBlobUrl(node.href, {
+                      source: 'document.click',
+                      download: node.download || ''
+                    });
+                    break;
+                  }
+                }
+              } catch {}
+            }, true);
+
+            const observer = new MutationObserver((mutations) => {
+              try {
+                for (const mutation of mutations) {
+                  for (const node of mutation.addedNodes) {
+                    if (!(node instanceof Element)) continue;
+                    const anchors = [];
+                    if (node instanceof HTMLAnchorElement) anchors.push(node);
+                    anchors.push(...node.querySelectorAll?.('a[href],a[download]') || []);
+                    for (const anchor of anchors) {
+                      rememberBlobUrl(anchor.href, {
+                        source: 'mutation',
+                        download: anchor.download || ''
+                      });
+                    }
+                  }
+
+                  if (mutation.type === 'attributes' && mutation.target instanceof HTMLAnchorElement) {
+                    rememberBlobUrl(mutation.target.href, {
+                      source: 'attribute',
+                      download: mutation.target.download || ''
+                    });
+                  }
+                }
+              } catch {}
+            });
+
+            const startObserver = () => {
+              if (document.documentElement) {
+                observer.observe(document.documentElement, {
+                  subtree: true,
+                  childList: true,
+                  attributes: true,
+                  attributeFilter: ['href', 'download']
+                });
+              }
+            };
+
+            startObserver();
+
+            const scanAnchors = () => {
+              try {
+                for (const anchor of document.querySelectorAll('a[href],a[download]')) {
+                  rememberBlobUrl(anchor.href, {
+                    source: 'scan',
+                    download: anchor.download || ''
                   });
                 }
               } catch {}
-              return originalAnchorClick.call(this);
             };
+
+            scanAnchors();
+            setInterval(scanAnchors, 1000);
           });
 
           const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -139,7 +217,6 @@ jobs:
           console.log('Clicking the file Download control...');
           await target.click({ timeout: 30000 });
 
-          // Wait for Proton itself to report that the decrypted transfer finished.
           let transferComplete = false;
           for (let i = 0; i < 180; i++) {
             const body = await page.locator('body').innerText();
@@ -153,55 +230,107 @@ jobs:
             await sleep(1000);
           }
 
-          // Give the download UI a moment to create/click its blob URL.
-          await sleep(3000);
+          await sleep(2000);
 
           const capture = await page.evaluate(async () => {
             const bridge = window.__protonBridge;
-            if (!bridge || !bridge.clicks?.length) return null;
+            if (!bridge) return { error: 'Bridge instrumentation is missing.' };
 
-            // Prefer the most recent blob click.
-            const click = bridge.clicks[bridge.clicks.length - 1];
-            const blob = bridge.blobs.get(click.href);
+            const candidates = [...bridge.blobUrls];
 
-            if (!blob) {
-              return { error: 'A blob URL was clicked, but its Blob object was not captured.' };
+            for (const anchor of document.querySelectorAll('a[href],a[download]')) {
+              const href = anchor.href || '';
+              if (href.startsWith('blob:')) {
+                candidates.push(href);
+                bridge.blobUrls.add(href);
+              }
             }
 
-            const buffer = await blob.arrayBuffer();
-            const bytes = new Uint8Array(buffer);
+            const unique = [...new Set(candidates)];
+            const results = [];
 
-            // Base64 lets the browser hand arbitrary binary bytes back to Node.
-            let binary = '';
-            const chunkSize = 0x8000;
-            for (let i = 0; i < bytes.length; i += chunkSize) {
-              binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+            for (const blobUrl of unique.reverse()) {
+              try {
+                let blob = bridge.blobs.get(blobUrl);
+
+                if (!blob) {
+                  const response = await fetch(blobUrl);
+                  if (!response.ok) {
+                    results.push({ url: blobUrl, error: 'fetch failed: ' + response.status });
+                    continue;
+                  }
+                  blob = await response.blob();
+                }
+
+                if (!blob || blob.size === 0) {
+                  results.push({ url: blobUrl, error: 'empty blob' });
+                  continue;
+                }
+
+                const buffer = await blob.arrayBuffer();
+                const bytes = new Uint8Array(buffer);
+
+                let binary = '';
+                const chunkSize = 0x8000;
+                for (let i = 0; i < bytes.length; i += chunkSize) {
+                  binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+                }
+
+                const event = bridge.events
+                  .slice()
+                  .reverse()
+                  .find(item => item.url === blobUrl);
+
+                return {
+                  url: blobUrl,
+                  name: event?.download || '',
+                  mime: blob.type || 'application/octet-stream',
+                  size: bytes.length,
+                  base64: btoa(binary),
+                  events: bridge.events.slice(-50)
+                };
+              } catch (error) {
+                results.push({
+                  url: blobUrl,
+                  error: String(error)
+                });
+              }
             }
 
             return {
-              name: click.download || 'proton-download',
-              mime: blob.type || 'application/octet-stream',
-              size: bytes.length,
-              base64: btoa(binary)
+              error: 'No usable blob URL was observed by the browser instrumentation.',
+              events: bridge.events.slice(-50),
+              results
             };
           });
 
-          if (!capture || capture.error) {
+          console.log('Blob capture summary:', JSON.stringify({
+            error: capture?.error,
+            name: capture?.name,
+            mime: capture?.mime,
+            size: capture?.size,
+            url: capture?.url,
+            eventCount: capture?.events?.length
+          }));
+
+          if (!capture || capture.error || !capture.base64) {
             await page.screenshot({ path: path.join(outputDir, 'proton-page-capture-failed.png'), fullPage: true });
             fs.writeFileSync(
               path.join(outputDir, 'proton-page-capture-failed.txt'),
               JSON.stringify(capture, null, 2)
             );
-            throw new Error(capture?.error || 'No blob download was captured from Proton.');
+            throw new Error(capture?.error || 'No usable Proton blob was captured.');
           }
 
-          const safeName = String(capture.name).replace(/[^a-zA-Z0-9._-]/g, '_');
+          const safeName = String(capture.name || 'proton-download')
+            .replace(/[^a-zA-Z0-9._-]/g, '_');
+
           const destination = path.join(outputDir, safeName);
           const bytes = Buffer.from(capture.base64, 'base64');
 
           fs.writeFileSync(destination, bytes);
 
-          console.log('SUCCESS: captured Proton decrypted blob');
+          console.log('SUCCESS: captured Proton download');
           console.log('Filename:', safeName);
           console.log('MIME type:', capture.mime);
           console.log('Bytes:', bytes.length);
