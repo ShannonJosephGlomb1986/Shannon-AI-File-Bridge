@@ -95,7 +95,6 @@ jobs:
             console.log('Download control', i, JSON.stringify(info));
           }
 
-          // The second/current file Download control is the actionable one.
           const target = buttons.last();
 
           console.log('Clicking the file Download control...');
@@ -105,76 +104,67 @@ jobs:
           console.log('Page text after click:');
           console.log((await page.locator('body').innerText()).slice(0, 7000));
 
-          // Proton reports transfer completion in its own UI. The browser may save
-          // the resulting file through Chrome's download manager rather than emit
-          // a Playwright download event, so monitor both the configured downloads
-          // directory and common browser download locations.
-          const candidates = [
-            downloadsDir,
-            outputDir,
-            path.join(process.env.HOME || '/home/runner', 'Downloads')
-          ];
+          // Wait until the Proton UI reports the transfer as complete.
+          let transferComplete = false;
+          for (let i = 0; i < 120; i++) {
+            const body = await page.locator('body').innerText();
+            if (/1 of 1 transfers completed/i.test(body) && /Downloaded/i.test(body)) {
+              transferComplete = true;
+              console.log('Proton reports: transfer completed and file downloaded.');
+              break;
+            }
+            await sleep(1000);
+          }
 
+          if (!transferComplete) {
+            console.log('Proton did not report completion within the expected time.');
+          }
+
+          // Wait for an actual filesystem object to appear in the configured
+          // Playwright download directory. Do not treat page text alone as a file.
           let found = [];
 
-          for (let i = 0; i < 90 && found.length === 0; i++) {
-            for (const dir of candidates) {
-              if (!fs.existsSync(dir)) continue;
-
-              for (const name of fs.readdirSync(dir)) {
-                const full = path.join(dir, name);
-                if (!fs.existsSync(full) || !fs.statSync(full).isFile()) continue;
-
-                // Ignore diagnostics and partial browser files.
-                if (
-                  name.endsWith('.png') ||
-                  name.endsWith('.txt') ||
-                  name.endsWith('.crdownload') ||
-                  name.endsWith('.tmp') ||
-                  name.endsWith('.part')
-                ) continue;
-
-                found.push(full);
-              }
+          for (let i = 0; i < 60 && found.length === 0; i++) {
+            if (fs.existsSync(downloadsDir)) {
+              found = fs.readdirSync(downloadsDir)
+                .map(name => path.join(downloadsDir, name))
+                .filter(full => fs.existsSync(full) && fs.statSync(full).isFile())
+                .filter(full => {
+                  const name = path.basename(full);
+                  return !name.endsWith('.crdownload') &&
+                         !name.endsWith('.tmp') &&
+                         !name.endsWith('.part');
+                });
             }
 
             if (found.length) break;
             await sleep(1000);
           }
 
-          // As a final fallback, scan the runner's normal Downloads directory.
-          if (found.length === 0 && fs.existsSync(downloadsDir)) {
-            found = fs.readdirSync(downloadsDir)
-              .map(name => path.join(downloadsDir, name))
-              .filter(full => fs.existsSync(full) && fs.statSync(full).isFile())
-              .filter(full => !full.endsWith('.crdownload') && !full.endsWith('.tmp') && !full.endsWith('.part'));
-          }
-
-          console.log('Download locations checked:', candidates.join(', '));
-          console.log('Found files:', found);
+          console.log('Playwright downloads directory:', downloadsDir);
+          console.log('Files found there:', found);
 
           if (found.length === 0) {
             await page.screenshot({ path: path.join(outputDir, 'proton-page-after-click.png'), fullPage: true });
-            fs.writeFileSync(path.join(outputDir, 'proton-page-after-click.txt'), await page.locator('body').innerText());
-
-            console.log('Home directory recent files:');
-            const { execSync } = await import('node:child_process');
-            try {
-              console.log(execSync("find "$HOME" -type f -mmin -10 -not -path '*/.cache/*' | head -100").toString());
-            } catch {}
-            throw new Error('Proton reported the transfer as downloaded, but no local file could be found.');
+            fs.writeFileSync(
+              path.join(outputDir, 'proton-page-after-click.txt'),
+              await page.locator('body').innerText()
+            );
+            throw new Error('Proton reported the transfer completed, but Playwright did not expose the downloaded file.');
           }
 
-          // Copy the newest candidate into the artifact directory.
           found.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
           const source = found[0];
           const destination = path.join(outputDir, path.basename(source));
 
-          if (source !== destination) {
-            fs.copyFileSync(source, destination);
-          }
+          fs.copyFileSync(source, destination);
 
-          console.log('SUCCESS: collected downloaded file:', destination, fs.statSync(destination).size, 'bytes');
+          const size = fs.statSync(destination).size;
+          console.log('SUCCESS: collected downloaded file:', destination, size, 'bytes');
+
+          if (size === 0) {
+            throw new Error('Downloaded file is empty.');
+          }
 
           await browser.close();
           EOF
