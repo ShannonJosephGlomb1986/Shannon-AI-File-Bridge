@@ -42,6 +42,8 @@ jobs:
         run: |
           rm -rf bridge-output
           mkdir -p bridge-output
+          rm -rf "$HOME/Downloads"
+          mkdir -p "$HOME/Downloads"
 
           cat > bridge-download.mjs <<'EOF'
           import { chromium } from 'playwright';
@@ -50,6 +52,7 @@ jobs:
 
           const url = process.env.PROTON_SHARE_URL;
           const outputDir = path.resolve('bridge-output');
+          const downloadsDir = path.join(process.env.HOME || '/home/runner', 'Downloads');
 
           if (!url) throw new Error('PROTON_SHARE_URL is missing');
 
@@ -60,11 +63,10 @@ jobs:
 
           const context = await browser.newContext({
             acceptDownloads: true,
-            downloadsPath: outputDir
+            downloadsPath: downloadsDir
           });
 
           const page = await context.newPage();
-
           const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
           console.log('Opening Proton public share...');
@@ -72,81 +74,107 @@ jobs:
           await sleep(8000);
 
           console.log('Page title:', await page.title());
-          console.log('Initial page text:');
           console.log((await page.locator('body').innerText()).slice(0, 5000));
 
           const buttons = page.locator('button, a, [role="button"]').filter({ hasText: /download/i });
           const count = await buttons.count();
           console.log('Download controls found:', count);
 
-          for (let i = 0; i < count; i++) {
-            const info = await buttons.nth(i).evaluate(el => ({
-              tag: el.tagName,
-              text: el.textContent?.trim(),
-              aria: el.getAttribute('aria-label'),
-              testid: el.getAttribute('data-testid'),
-              href: el.getAttribute('href')
-            }));
-            console.log('Download control', i, JSON.stringify(info));
-          }
-
           if (count === 0) {
             await page.screenshot({ path: path.join(outputDir, 'proton-page-no-download.png'), fullPage: true });
             throw new Error('No Download control was found.');
           }
 
-          const target = buttons.last();
-          console.log('Clicking the last Download control...');
+          for (let i = 0; i < count; i++) {
+            const info = await buttons.nth(i).evaluate(el => ({
+              tag: el.tagName,
+              text: el.textContent?.trim(),
+              testid: el.getAttribute('data-testid'),
+              aria: el.getAttribute('aria-label')
+            }));
+            console.log('Download control', i, JSON.stringify(info));
+          }
 
-          // Proton's current web UI starts a transfer inside the page rather than
-          // necessarily emitting a native browser download event.
+          // The second/current file Download control is the actionable one.
+          const target = buttons.last();
+
+          console.log('Clicking the file Download control...');
           await target.click({ timeout: 30000 });
           await sleep(5000);
 
           console.log('Page text after click:');
           console.log((await page.locator('body').innerText()).slice(0, 7000));
 
-          // Give Proton plenty of time to finish the encrypted transfer.
-          let stableCount = 0;
-          let previousFiles = '';
+          // Proton reports transfer completion in its own UI. The browser may save
+          // the resulting file through Chrome's download manager rather than emit
+          // a Playwright download event, so monitor both the configured downloads
+          // directory and common browser download locations.
+          const candidates = [
+            downloadsDir,
+            outputDir,
+            path.join(process.env.HOME || '/home/runner', 'Downloads')
+          ];
 
-          for (let i = 0; i < 180; i++) {
-            const files = fs.readdirSync(outputDir)
-              .filter(name => !name.endsWith('.png'))
-              .map(name => {
-                const full = path.join(outputDir, name);
-                const st = fs.statSync(full);
-                return name + ':' + st.size;
-              })
-              .sort()
-              .join('|');
+          let found = [];
 
-            if (files !== previousFiles) {
-              console.log('Output directory:', files || '(empty)');
-              previousFiles = files;
-              stableCount = 0;
-            } else {
-              stableCount++;
+          for (let i = 0; i < 90 && found.length === 0; i++) {
+            for (const dir of candidates) {
+              if (!fs.existsSync(dir)) continue;
+
+              for (const name of fs.readdirSync(dir)) {
+                const full = path.join(dir, name);
+                if (!fs.existsSync(full) || !fs.statSync(full).isFile()) continue;
+
+                // Ignore diagnostics and partial browser files.
+                if (
+                  name.endsWith('.png') ||
+                  name.endsWith('.txt') ||
+                  name.endsWith('.crdownload') ||
+                  name.endsWith('.tmp') ||
+                  name.endsWith('.part')
+                ) continue;
+
+                found.push(full);
+              }
             }
 
-            if (files && stableCount >= 4) break;
+            if (found.length) break;
             await sleep(1000);
           }
 
-          const finalFiles = fs.readdirSync(outputDir)
-            .filter(name => !name.endsWith('.png'));
+          // As a final fallback, scan the runner's normal Downloads directory.
+          if (found.length === 0 && fs.existsSync(downloadsDir)) {
+            found = fs.readdirSync(downloadsDir)
+              .map(name => path.join(downloadsDir, name))
+              .filter(full => fs.existsSync(full) && fs.statSync(full).isFile())
+              .filter(full => !full.endsWith('.crdownload') && !full.endsWith('.tmp') && !full.endsWith('.part'));
+          }
 
-          if (finalFiles.length === 0) {
+          console.log('Download locations checked:', candidates.join(', '));
+          console.log('Found files:', found);
+
+          if (found.length === 0) {
             await page.screenshot({ path: path.join(outputDir, 'proton-page-after-click.png'), fullPage: true });
             fs.writeFileSync(path.join(outputDir, 'proton-page-after-click.txt'), await page.locator('body').innerText());
-            throw new Error('Proton transfer did not produce a downloaded file.');
+
+            console.log('Home directory recent files:');
+            const { execSync } = await import('node:child_process');
+            try {
+              console.log(execSync("find "$HOME" -type f -mmin -10 -not -path '*/.cache/*' | head -100").toString());
+            } catch {}
+            throw new Error('Proton reported the transfer as downloaded, but no local file could be found.');
           }
 
-          console.log('Downloaded files:');
-          for (const name of finalFiles) {
-            const full = path.join(outputDir, name);
-            console.log(full, fs.statSync(full).size, 'bytes');
+          // Copy the newest candidate into the artifact directory.
+          found.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+          const source = found[0];
+          const destination = path.join(outputDir, path.basename(source));
+
+          if (source !== destination) {
+            fs.copyFileSync(source, destination);
           }
+
+          console.log('SUCCESS: collected downloaded file:', destination, fs.statSync(destination).size, 'bytes');
 
           await browser.close();
           EOF
