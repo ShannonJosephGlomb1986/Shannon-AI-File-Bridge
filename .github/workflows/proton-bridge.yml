@@ -373,6 +373,14 @@ jobs:
           fi
           node bridge-upload-supabase.mjs
 
+      - name: Verify Supabase copy
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::notice::SUPABASE_SERVICE_ROLE_KEY is not configured; Supabase verification skipped."
+            exit 0
+          fi
+          node bridge-verify-supabase.mjs
+
       - name: Upload bridge artifact
         if: always()
         uses: actions/upload-artifact@v6
