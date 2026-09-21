@@ -202,6 +202,8 @@ try {
 
     console.log(`Processing: ${fileName} (${size} bytes, sha256 ${hash})`);
 
+    downloadedCount += 1;
+
     const existing = await findExisting(storagePath);
 
     if (existing?.sha256 === hash) {
