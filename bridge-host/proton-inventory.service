@@ -1,0 +1,13 @@
+[Unit]
+Description=Shannon AI File Bridge - Proton inventory probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/Shannon-AI-File-Bridge/bridge-host/inventory-probe.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=%h/.shannon-ai-file-bridge
