@@ -18,17 +18,17 @@
 - [x] Create bridge_files registry table
 - [x] Verify bucket is private and database foundation exists
 - [x] Add GitHub Actions secret: SUPABASE_SERVICE_ROLE_KEY
-- [ ] Add Supabase upload step to the bridge workflow
+- [x] Add Supabase upload step to the bridge workflow
 - [x] Upload recovered files into private Supabase Storage
 - [x] Record file metadata and SHA-256 in bridge_files
 - [x] Record sync execution status in bridge_runs
 - [x] Verify uploaded file can be downloaded from Supabase
-- [ ] Keep GitHub artifact as a short-term diagnostic backup
+- [x] Keep GitHub artifact as a short-term diagnostic backup
 - [ ] Add retention/cleanup policy after Supabase storage is verified
 
 ## Phase 3 — Whole Proton Drive access
 
-- [ ] Investigate official Proton Drive CLI authentication on a persistent bridge host
+- [ ] Use the official Proton Drive CLI on a persistent bridge host
 - [ ] Establish a persistent authenticated Proton session
 - [ ] List Proton Drive folders/files
 - [ ] Detect new and changed files
@@ -37,15 +37,26 @@
 - [ ] Handle deletions/renames safely
 - [ ] Add integrity verification and retry handling
 
+> Proton now provides an official Proton Drive CLI for Windows, macOS and Linux. It supports browser-based authentication, folder/file listing, downloads, uploads, sharing, and JSON output for automation. The remaining infrastructure challenge for this project is obtaining a persistent authenticated bridge host because the current restricted computer does not provide a reliable command-line environment.
+
 ## Phase 4 — Floot file-control panel
 
-- [ ] Connect Floot to Bridge HQ
-- [ ] Show folders/files from Supabase
-- [ ] Show sync status and last-seen time
-- [ ] Search files
-- [ ] Download/open files
+- [x] Connect Floot to Bridge HQ
+- [x] Show registered files from Supabase
+- [x] Show sync status and last-seen time
+- [x] Search files by name/path/source/status
+- [ ] Show Proton folder hierarchy
+- [ ] Fully verify the user-facing download action
 - [ ] Show version/history information
 - [ ] Add safe file actions
+
+## Anchor integration
+
+- [x] Map Anchor as an AI-connected workspace in Bridge HQ
+- [x] Confirm the connected Anchor workspace is available to ChatGPT
+- [ ] Define the Bridge HQ ↔ Anchor routing model
+- [ ] Add an actual automated Anchor transfer path if a supported backend/API integration becomes available
+- [ ] Keep Anchor useful for durable project notes, documentation and AI collaboration even when automatic binary-file transfer is not available
 
 ## Phase 5 — ChatGPT working layer
 
@@ -70,3 +81,4 @@
 4. Preserve version history and backups.
 5. Validate every meaningful transfer.
 6. Keep the working bridge observable through logs and registry records.
+7. Treat each storage provider as a replaceable connector rather than rebuilding the bridge around one provider.
