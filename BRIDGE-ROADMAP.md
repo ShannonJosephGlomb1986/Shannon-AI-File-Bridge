@@ -17,12 +17,12 @@
 - [x] Create bridge_runs registry table
 - [x] Create bridge_files registry table
 - [x] Verify bucket is private and database foundation exists
-- [ ] Add GitHub Actions secret: SUPABASE_SERVICE_ROLE_KEY
+- [x] Add GitHub Actions secret: SUPABASE_SERVICE_ROLE_KEY
 - [ ] Add Supabase upload step to the bridge workflow
-- [ ] Upload recovered files into private Supabase Storage
-- [ ] Record file metadata and SHA-256 in bridge_files
-- [ ] Record sync execution status in bridge_runs
-- [ ] Verify uploaded file can be downloaded from Supabase
+- [x] Upload recovered files into private Supabase Storage
+- [x] Record file metadata and SHA-256 in bridge_files
+- [x] Record sync execution status in bridge_runs
+- [x] Verify uploaded file can be downloaded from Supabase
 - [ ] Keep GitHub artifact as a short-term diagnostic backup
 - [ ] Add retention/cleanup policy after Supabase storage is verified
 
