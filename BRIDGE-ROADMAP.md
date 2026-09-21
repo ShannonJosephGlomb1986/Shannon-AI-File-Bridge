@@ -57,6 +57,11 @@
 - [ ] Return updated files to the cloud
 - [ ] Build a reliable human + AI editing workflow
 
+## Future bulk-storage candidates
+
+- [ ] Evaluate TeraBox as a large-capacity bulk storage option after the core bridge project is complete
+- [ ] Compare privacy, API/automation support, reliability, limits and suitability before adopting it
+
 ## Operating rules
 
 1. Never commit credentials or secrets to GitHub.
