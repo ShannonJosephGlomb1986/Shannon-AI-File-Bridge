@@ -28,8 +28,9 @@
 
 ## Phase 3 — Whole Proton Drive access
 
-- [ ] Use the official Proton Drive CLI on a persistent bridge host
-- [ ] Establish a persistent authenticated Proton session
+- [x] Add persistent Proton Drive CLI bridge-host foundation and read-only inventory probe
+- [ ] Provision the persistent bridge host and establish an authenticated Proton session
+- [ ] Capture and inspect a real Proton Drive JSON inventory
 - [ ] List Proton Drive folders/files
 - [ ] Detect new and changed files
 - [ ] Preserve Proton folder paths in Supabase
