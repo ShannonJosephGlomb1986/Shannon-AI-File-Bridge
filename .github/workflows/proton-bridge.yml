@@ -10,10 +10,11 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      actions: write
 
     env:
       PROTON_SHARE_URL: ${{ secrets.PROTON_SHARE_URL }}
+      SUPABASE_URL: https://yxblctqvlbgsqtzwuqss.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
     steps:
       - name: Check bridge configuration
@@ -241,6 +242,11 @@ jobs:
 
           await sleep(2000);
 
+          if (!transferComplete) {
+            await page.screenshot({ path: path.join(outputDir, 'proton-transfer-timeout.png'), fullPage: true });
+            throw new Error('Proton did not report a completed download within the expected time.');
+          }
+
           const capture = await page.evaluate(async () => {
             const bridge = window.__protonBridge;
             if (!bridge) return { error: 'Bridge instrumentation is missing.' };
@@ -358,6 +364,14 @@ jobs:
           EOF
 
           node bridge-download.mjs
+
+      - name: Publish to Supabase
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::notice::SUPABASE_SERVICE_ROLE_KEY is not configured yet; Supabase publish skipped."
+            exit 0
+          fi
+          node bridge-upload-supabase.mjs
 
       - name: Upload bridge artifact
         if: always()
