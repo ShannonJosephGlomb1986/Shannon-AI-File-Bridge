@@ -251,11 +251,20 @@ jobs:
             console.log('Folder Download action count:', await folderDownload.count());
             console.log('Folder Scan & Download action count:', await scanDownload.count());
 
-            if (await folderDownload.count() === 0) {
-              throw new Error('Proton folder Download action was not found in the open menu.');
+            if (await folderDownload.count() === 0 && await scanDownload.count() === 0) {
+              throw new Error('Neither Proton folder Download nor Scan & Download action was found in the open menu.');
             }
 
-            target = folderDownload;
+            // Proton explicitly provides Scan & Download as the direct device-download
+            // path for shared links. Prefer it for the automation bridge; fall back to
+            // ordinary Download only if the scan action is unavailable.
+            if (await scanDownload.count() > 0) {
+              console.log('Using Proton folder Scan & Download action.');
+              target = scanDownload;
+            } else {
+              console.log('Scan & Download unavailable; using ordinary folder Download action.');
+              target = folderDownload;
+            }
           } else {
             target = buttons.last();
           }
