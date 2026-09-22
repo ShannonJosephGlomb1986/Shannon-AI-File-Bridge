@@ -6,7 +6,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/$/, '');
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const OUTPUT_DIR = path.resolve(process.env.BRIDGE_OUTPUT_DIR || 'bridge-output');
 const BUCKET = 'bridge-files';
-const SOURCE = 'proton-public-share';
+const SOURCE = 'proton-public-share-folder';
 
 if (!SUPABASE_URL) throw new Error('SUPABASE_URL is missing');
 if (!SERVICE_KEY) throw new Error('SUPABASE_SERVICE_ROLE_KEY is missing');
@@ -172,12 +172,28 @@ async function uploadObject(storagePath, data, contentType) {
   }
 }
 
-const entries = await fs.readdir(OUTPUT_DIR, { withFileTypes: true });
-const files = entries
-  .filter(entry => entry.isFile())
-  .map(entry => entry.name)
-  .filter(name => !name.endsWith('.png') && !name.endsWith('.txt'))
-  .sort();
+async function collectFiles(currentDir, relativeRoot = '') {
+  const entries = await fs.readdir(currentDir, { withFileTypes: true });
+  const result = [];
+
+  for (const entry of entries) {
+    const relativePath = path.join(relativeRoot, entry.name);
+    const absolutePath = path.join(currentDir, entry.name);
+
+    if (entry.isDirectory()) {
+      result.push(...await collectFiles(absolutePath, relativePath));
+      continue;
+    }
+
+    if (!entry.isFile()) continue;
+    if (/\\.(png|txt)$/i.test(entry.name)) continue;
+    result.push(relativePath);
+  }
+
+  return result;
+}
+
+const files = (await collectFiles(OUTPUT_DIR)).sort();
 
 console.log(`Supabase publish starting. Files discovered: ${files.length}`);
 
@@ -197,7 +213,8 @@ try {
   for (const fileName of files) {
     const localPath = path.join(OUTPUT_DIR, fileName);
     const { hash, size, data } = await sha256File(localPath);
-    const storagePath = `proton/${fileName}`;
+    const normalizedPath = fileName.split(path.sep).join('/');
+    const storagePath = `proton/${normalizedPath}`;
     const contentType = contentTypeFor(fileName);
 
     console.log(`Processing: ${fileName} (${size} bytes, sha256 ${hash})`);
@@ -222,11 +239,11 @@ try {
     const fileRow = {
       run_id: runId,
       source: SOURCE,
-      source_path: fileName,
+      source_path: normalizedPath,
       source_id: null,
       storage_bucket: BUCKET,
       storage_path: storagePath,
-      original_filename: fileName,
+      original_filename: path.basename(fileName),
       content_type: contentType,
       size_bytes: size,
       sha256: hash,
