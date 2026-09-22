@@ -258,24 +258,14 @@ jobs:
           console.log('Clicking Proton Download control...');
 
           let browserDownload = null;
-          let browserDownloadError = null;
+          let browserDownloadResult = null;
 
           if (isFolderView) {
-            const downloadPromise = page.waitForEvent('download', { timeout: 180000 })
+            browserDownloadResult = page.waitForEvent('download', { timeout: 180000 })
               .then(download => ({ download }))
               .catch(error => ({ error: String(error) }));
 
             await target.click({ timeout: 30000 });
-
-            const result = await downloadPromise;
-            browserDownload = result.download || null;
-            browserDownloadError = result.error || null;
-
-            if (browserDownload) {
-              console.log('Browser download event captured:', browserDownload.suggestedFilename());
-            } else if (browserDownloadError) {
-              console.log('No browser download event captured; continuing with blob fallback:', browserDownloadError);
-            }
           } else {
             await target.click({ timeout: 30000 });
           }
@@ -291,6 +281,21 @@ jobs:
             }
 
             await sleep(1000);
+          }
+
+          if (isFolderView && browserDownloadResult) {
+            const result = await Promise.race([
+              browserDownloadResult,
+              sleep(5000).then(() => ({ error: 'download event not observed within 5 seconds after transfer completion' }))
+            ]);
+
+            browserDownload = result.download || null;
+
+            if (browserDownload) {
+              console.log('Browser download event captured:', browserDownload.suggestedFilename());
+            } else {
+              console.log('Browser download event unavailable; continuing with blob fallback:', result.error);
+            }
           }
 
           await sleep(2000);
