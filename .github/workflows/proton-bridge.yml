@@ -260,8 +260,13 @@ jobs:
           let browserDownload = null;
           let browserDownloadResult = null;
 
+          const blobReadyResult = page.waitForFunction(
+            () => Boolean(window.__protonBridge?.blobUrls?.size),
+            { timeout: 300000 }
+          ).then(() => ({ ready: true })).catch(error => ({ error: String(error) }));
+
           if (isFolderView) {
-            browserDownloadResult = page.waitForEvent('download', { timeout: 180000 })
+            browserDownloadResult = page.waitForEvent('download', { timeout: 300000 })
               .then(download => ({ download }))
               .catch(error => ({ error: String(error) }));
 
@@ -271,8 +276,11 @@ jobs:
           }
 
           let transferComplete = false;
-          for (let i = 0; i < 180; i++) {
+          let transferText = '';
+
+          for (let i = 0; i < 300; i++) {
             const body = await page.locator('body').innerText();
+            transferText = body;
 
             if (/\b\d+\s+of\s+\d+\s+transfers\s+completed\b/i.test(body) && /Downloaded/i.test(body)) {
               transferComplete = true;
@@ -286,30 +294,22 @@ jobs:
           if (isFolderView && browserDownloadResult) {
             const result = await Promise.race([
               browserDownloadResult,
-              sleep(5000).then(() => ({ error: 'download event not observed within 5 seconds after transfer completion' }))
+              blobReadyResult,
+              sleep(5000).then(() => ({ error: 'no browser download or blob signal after the transfer window' }))
             ]);
 
             browserDownload = result.download || null;
 
             if (browserDownload) {
               console.log('Browser download event captured:', browserDownload.suggestedFilename());
+            } else if (result.ready) {
+              console.log('A decrypted Proton blob is available; using blob capture fallback.');
             } else {
-              console.log('Browser download event unavailable; continuing with blob fallback:', result.error);
+              console.log('Browser/blob signal unavailable:', result.error);
             }
           }
 
-          await sleep(2000);
-
-          if (!transferComplete && !browserDownload) {
-            await page.screenshot({ path: path.join(outputDir, 'proton-transfer-timeout.png'), fullPage: true });
-            throw new Error('Proton did not provide a completed transfer signal or a browser download.');
-          }
-
-          if (browserDownload) {
-            console.log('Browser download is the authoritative transfer result for this run.');
-          } else {
-            console.log('Using Proton transfer-completed UI signal.');
-          }
+          await sleep(1000);
 
           let capture = null;
 
