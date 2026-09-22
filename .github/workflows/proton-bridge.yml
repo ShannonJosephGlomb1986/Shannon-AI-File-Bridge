@@ -39,7 +39,7 @@ jobs:
           npm install --no-save playwright
           npx playwright install --with-deps chromium
 
-      - name: Download from Proton public share
+      - name: Download from Proton public share folder
         run: |
           rm -rf bridge-output
           mkdir -p bridge-output
@@ -364,6 +364,64 @@ jobs:
           EOF
 
           node bridge-download.mjs
+
+      - name: Extract Proton folder archive when needed
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          import zipfile
+
+          output = Path("bridge-output")
+          archives = [p for p in output.iterdir() if p.is_file() and zipfile.is_zipfile(p)]
+
+          if not archives:
+              print("No ZIP archive detected; treating the downloaded item as a single file.")
+              raise SystemExit(0)
+
+          if len(archives) > 1:
+              raise SystemExit("Multiple ZIP archives detected; refusing ambiguous extraction.")
+
+          archive = archives[0]
+          extract_root = output / ".folder-extract"
+          if extract_root.exists():
+              shutil.rmtree(extract_root)
+          extract_root.mkdir(parents=True)
+
+          with zipfile.ZipFile(archive) as zf:
+              for info in zf.infolist():
+                  name = info.filename.replace("\\\\", "/")
+                  path = Path(name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"Unsafe ZIP path refused: {info.filename}")
+                  target = extract_root / path
+                  if info.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with zf.open(info) as src, target.open("wb") as dst:
+                          shutil.copyfileobj(src, dst)
+
+          archive.unlink()
+
+          for child in extract_root.iterdir():
+              destination = output / child.name
+              if destination.exists():
+                  if destination.is_dir() and child.is_dir():
+                      for nested in child.iterdir():
+                          target = destination / nested.name
+                          if target.exists():
+                              raise SystemExit(f"Extraction collision refused: {target}")
+                          shutil.move(str(nested), str(target))
+                      child.rmdir()
+                  else:
+                      raise SystemExit(f"Extraction collision refused: {destination}")
+              else:
+                  shutil.move(str(child), str(destination))
+
+          shutil.rmtree(extract_root)
+          print(f"Extracted Proton folder archive: {archive.name}")
+          PY
 
       - name: Publish to Supabase
         run: |
