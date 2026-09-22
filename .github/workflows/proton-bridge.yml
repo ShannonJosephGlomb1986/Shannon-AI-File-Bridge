@@ -222,18 +222,76 @@ jobs:
             console.log('Download control', i, JSON.stringify(info));
           }
 
-          const target = buttons.last();
+          const isFolderView =
+            /(?:^|\\n)Uploaded by\\s*(?:\\n|$)/i.test(pageBody) &&
+            /(?:^|\\n)Size\\s*(?:\\n|$)/i.test(pageBody);
 
-          console.log('Clicking the file Download control...');
+          console.log('Detected Proton source:', isFolderView ? 'folder' : 'single file');
+
+          let target;
+          if (isFolderView) {
+            const trigger = page.locator('[data-testid="dropdown-download-button"]').first();
+
+            if (await trigger.count() === 0) {
+              throw new Error('Proton folder Download menu trigger was not found.');
+            }
+
+            console.log('Opening Proton folder Download menu...');
+            await trigger.click({ timeout: 30000 });
+            await sleep(600);
+
+            const candidates = await page.evaluate(() => {
+              const visible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.visibility !== 'hidden' &&
+                  style.display !== 'none' &&
+                  rect.width > 0 &&
+                  rect.height > 0;
+              };
+
+              return [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"]')]
+                .map((el, index) => {
+                  const rect = el.getBoundingClientRect();
+                  const text = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+                  const role = el.getAttribute('role') || '';
+                  const testid = el.getAttribute('data-testid') || '';
+                  const inMenu = role === 'menuitem' || !!el.closest('[role="menu"]');
+                  const matchesDownload = /download/i.test(text);
+                  let score = 0;
+                  if (matchesDownload) score += 30;
+                  if (inMenu) score += 100;
+                  if (rect.top < 350) score += 20;
+                  if (testid === 'dropdown-download-button') score -= 200;
+                  return { index, text, role, testid, top: Math.round(rect.top), score, visible: visible(el) };
+                })
+                .filter(item => item.visible && /download/i.test(item.text) && item.testid !== 'dropdown-download-button')
+                .sort((a, b) => b.score - a.score);
+            });
+
+            console.log('Folder Download menu candidates:', JSON.stringify(candidates.slice(0, 12)));
+
+            if (!candidates.length) {
+              throw new Error('No visible Download action appeared after opening the Proton folder menu.');
+            }
+
+            const chosen = candidates[0];
+            console.log('Clicking folder download action:', JSON.stringify(chosen));
+            target = page.locator('button, a, [role="button"], [role="menuitem"]').nth(chosen.index);
+          } else {
+            target = buttons.last();
+          }
+
+          console.log('Clicking Proton Download control...');
           await target.click({ timeout: 30000 });
 
           let transferComplete = false;
           for (let i = 0; i < 180; i++) {
             const body = await page.locator('body').innerText();
 
-            if (/1 of 1 transfers completed/i.test(body) && /Downloaded/i.test(body)) {
+            if (/\\b\\d+\\s+of\\s+\\d+\\s+transfers\\s+completed\\b/i.test(body) && /Downloaded/i.test(body)) {
               transferComplete = true;
-              console.log('Proton reports: transfer completed and file downloaded.');
+              console.log('Proton reports: transfer(s) completed and file downloaded.');
               break;
             }
 
@@ -344,11 +402,19 @@ jobs:
             .replace(/[. ]+$/, '')
             .trim();
 
-          const finalName = safeName || 'proton-download.bin';
+          let finalName = safeName || 'proton-download.bin';
+          if (isFolderView && !/\\.zip$/i.test(finalName)) {
+            finalName = `${finalName}.zip`;
+          }
+
           const destination = path.join(outputDir, finalName);
           const bytes = Buffer.from(capture.base64, 'base64');
 
           fs.writeFileSync(destination, bytes);
+          fs.writeFileSync(
+            path.join(outputDir, '.proton-source-type'),
+            isFolderView ? 'folder' : 'file'
+          );
 
           console.log('SUCCESS: captured Proton download');
           console.log('Filename:', finalName);
@@ -373,14 +439,23 @@ jobs:
           import zipfile
 
           output = Path("bridge-output")
-          archives = [p for p in output.iterdir() if p.is_file() and zipfile.is_zipfile(p)]
+          marker = output / ".proton-source-type"
+          source_type = marker.read_text().strip() if marker.exists() else "file"
 
-          if not archives:
-              print("No ZIP archive detected; treating the downloaded item as a single file.")
+          if source_type != "folder":
+              print("Downloaded source is a single file; skipping folder extraction.")
               raise SystemExit(0)
 
+          archives = [
+              p for p in output.iterdir()
+              if p.is_file() and p.suffix.lower() == ".zip"
+          ]
+
+          if not archives:
+              raise SystemExit("Proton folder download was expected to be a ZIP, but no .zip file was captured.")
+
           if len(archives) > 1:
-              raise SystemExit("Multiple ZIP archives detected; refusing ambiguous extraction.")
+              raise SystemExit("Multiple folder ZIP archives detected; refusing ambiguous extraction.")
 
           archive = archives[0]
           extract_root = output / ".folder-extract"
