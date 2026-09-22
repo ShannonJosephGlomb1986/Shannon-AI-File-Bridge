@@ -234,11 +234,10 @@ jobs:
           console.log('Detected Proton source:', isFolderView ? 'folder' : 'single file');
 
           if (isFolderView) {
-            // CI can observe Proton's folder-download event, but the underlying
-            // archive stream does not become readable. Avoid the folder ZIP path
-            // entirely: use the working decrypted single-file download mechanism
-            // on each directly-downloadable child instead.
-            const childCount = Math.max(0, count - 1); // first Download control is the folder toolbar
+            // The first-level shared folder can contain nested folders. A row whose
+            // size is "--" is treated as a nested folder and deferred for recursive
+            // traversal; we only process actual file rows in this pass.
+            const childCount = Math.max(0, count - 1);
             console.log('Folder child download controls:', childCount);
 
             if (childCount === 0) {
@@ -253,6 +252,7 @@ jobs:
                 const ignored = /^(Download|More options|Name|Uploaded by|Size|Grid layout|Save for later|Sign up|Create|Copy link|End-to-end encrypted|Report an issue|S)$/i;
                 let node = el;
                 let fallback = '';
+                let likelyFolder = false;
 
                 for (let depth = 0; depth < 8 && node; depth++, node = node.parentElement) {
                   const lines = (node.innerText || '')
@@ -260,9 +260,14 @@ jobs:
                     .map((line) => line.trim())
                     .filter(Boolean);
 
+                  if (lines.includes('--')) {
+                    likelyFolder = true;
+                  }
+
                   const candidate = lines.find((line) =>
                     !ignored.test(line) &&
                     !/@/.test(line) &&
+                    line !== '--' &&
                     !/^\d+(?:\.\d+)?\s*(?:B|KB|MB|GB|TB)$/i.test(line)
                   );
 
@@ -272,15 +277,23 @@ jobs:
                   }
                 }
 
-                return { fallback };
+                return { fallback, likelyFolder };
               });
+
+              if (itemMeta.likelyFolder) {
+                console.log(
+                  'Skipping nested Proton folder for this pass: ' +
+                  (itemMeta.fallback || '(folder name unavailable)')
+                );
+                continue;
+              }
 
               const knownUrls = await page.evaluate(() =>
                 [...(window.__protonBridge?.blobUrls || [])]
               );
 
               console.log(
-                'Downloading folder child ' + index + '/' + (count - 1) + ': ' +
+                'Downloading Proton file child ' + index + '/' + (count - 1) + ': ' +
                 (itemMeta.fallback || '(filename pending)')
               );
 
@@ -290,84 +303,120 @@ jobs:
                   return current.some((url) => !known.includes(url));
                 },
                 knownUrls,
-                { timeout: 180000 }
-              ).catch((error) => ({ error: String(error) }));
+                { timeout: 240000 }
+              ).then(() => ({ type: 'blob' }))
+               .catch((error) => ({ type: 'blob-error', error: String(error) }));
+
+              const downloadPromise = page.waitForEvent('download', { timeout: 240000 })
+                .then((download) => ({ type: 'download', download }))
+                .catch((error) => ({ type: 'download-error', error: String(error) }));
 
               await childButton.click({ timeout: 30000 });
 
-              const blobSignal = await blobPromise;
-              if (blobSignal?.error) {
-                throw new Error(
-                  'Timed out waiting for decrypted blob for folder child ' + index +
-                  ': ' + blobSignal.error
+              let signal = await Promise.race([downloadPromise, blobPromise]);
+              let itemCapture = null;
+
+              if (signal.type === 'download') {
+                const download = signal.download;
+                const suggestedName = await download.suggestedFilename();
+
+                console.log(
+                  'Browser file download event captured: ' +
+                  (suggestedName || '(unnamed)')
                 );
+
+                try {
+                  const stream = await download.createReadStream();
+                  if (stream) {
+                    const chunks = [];
+                    for await (const chunk of stream) {
+                      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                    }
+
+                    const bytes = Buffer.concat(chunks);
+                    if (bytes.length > 0) {
+                      itemCapture = {
+                        name: suggestedName || '',
+                        mime: 'application/octet-stream',
+                        size: bytes.length,
+                        base64: bytes.toString('base64')
+                      };
+                    }
+                  }
+                } catch (error) {
+                  console.log(
+                    'Browser file download stream failed; checking blob path: ' +
+                    String(error)
+                  );
+                  signal = await blobPromise;
+                }
               }
 
-              const itemCapture = await page.evaluate(async (known) => {
-                const bridge = window.__protonBridge;
-                if (!bridge) return { error: 'Bridge instrumentation is missing.' };
+              if (!itemCapture && signal.type === 'blob') {
+                const blobResult = await page.evaluate(async (known) => {
+                  const bridge = window.__protonBridge;
+                  if (!bridge) return { error: 'Bridge instrumentation is missing.' };
 
-                const candidates = [...bridge.blobUrls]
-                  .filter((url) => !known.includes(url))
-                  .reverse();
+                  const candidates = [...bridge.blobUrls]
+                    .filter((url) => !known.includes(url))
+                    .reverse();
 
-                const results = [];
+                  for (const blobUrl of candidates) {
+                    try {
+                      let blob = bridge.blobs.get(blobUrl);
 
-                for (const blobUrl of candidates) {
-                  try {
-                    let blob = bridge.blobs.get(blobUrl);
-
-                    if (!blob) {
-                      const response = await fetch(blobUrl);
-                      if (!response.ok) {
-                        results.push({ url: blobUrl, error: 'fetch failed: ' + response.status });
-                        continue;
+                      if (!blob) {
+                        const response = await fetch(blobUrl);
+                        if (!response.ok) continue;
+                        blob = await response.blob();
                       }
-                      blob = await response.blob();
-                    }
 
-                    if (!blob || blob.size === 0) {
-                      results.push({ url: blobUrl, error: 'empty blob' });
-                      continue;
-                    }
+                      if (!blob || blob.size === 0) continue;
 
-                    const buffer = await blob.arrayBuffer();
-                    const bytes = new Uint8Array(buffer);
+                      const buffer = await blob.arrayBuffer();
+                      const bytes = new Uint8Array(buffer);
 
-                    let binary = '';
-                    const chunkSize = 0x8000;
-                    for (let i = 0; i < bytes.length; i += chunkSize) {
-                      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-                    }
+                      let binary = '';
+                      const chunkSize = 0x8000;
+                      for (let i = 0; i < bytes.length; i += chunkSize) {
+                        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+                      }
 
-                    const event = bridge.events
-                      .slice()
-                      .reverse()
-                      .find((entry) => entry.url === blobUrl);
+                      const event = bridge.events
+                        .slice()
+                        .reverse()
+                        .find((entry) => entry.url === blobUrl);
 
-                    return {
-                      url: blobUrl,
-                      name: event?.download || '',
-                      mime: blob.type || 'application/octet-stream',
-                      size: bytes.length,
-                      base64: btoa(binary),
-                      events: bridge.events.slice(-20)
-                    };
-                  } catch (error) {
-                    results.push({ url: blobUrl, error: String(error) });
+                      return {
+                        url: blobUrl,
+                        name: event?.download || '',
+                        mime: blob.type || 'application/octet-stream',
+                        size: bytes.length,
+                        base64: btoa(binary)
+                      };
+                    } catch {}
                   }
+
+                  return { error: 'No usable new Proton blob was observed.' };
+                }, knownUrls);
+
+                if (blobResult.base64) {
+                  itemCapture = blobResult;
+                } else {
+                  throw new Error(
+                    'Unable to capture Proton file child ' + index + ': ' +
+                    (blobResult.error || 'missing blob payload')
+                  );
                 }
+              }
 
-                return {
-                  error: 'No usable new Proton blob was observed.',
-                  results
-                };
-              }, knownUrls);
-
-              if (itemCapture.error || !itemCapture.base64) {
+              if (!itemCapture) {
                 throw new Error(
-                  'Unable to capture folder child ' + index + ': ' +
-                  (itemCapture.error || 'missing blob payload')
+                  'No usable Proton child download signal for item ' + index +
+                  '. Download: ' +
+                  (signal.type === 'download-error' ? signal.error : '') +
+                  '. Blob: ' +
+                  (signal.type === 'blob-error' ? signal.error : '')
                 );
               }
 
@@ -403,16 +452,19 @@ jobs:
               await fs.promises.writeFile(destination, bytes);
 
               console.log(
-                'Captured folder child: ' + finalName +
-                ' (' + itemCapture.mime + ', ' + bytes.length + ' bytes)'
+                'Captured Proton file: ' + finalName +
+                ' (' + (itemCapture.mime || 'application/octet-stream') +
+                ', ' + bytes.length + ' bytes)'
               );
 
-              await page.evaluate((blobUrl) => {
-                try {
-                  window.__protonBridge?.blobs?.delete(blobUrl);
-                  window.__protonBridge?.blobUrls?.delete(blobUrl);
-                } catch {}
-              }, itemCapture.url);
+              if (itemCapture.url) {
+                await page.evaluate((blobUrl) => {
+                  try {
+                    window.__protonBridge?.blobs?.delete(blobUrl);
+                    window.__protonBridge?.blobUrls?.delete(blobUrl);
+                  } catch {}
+                }, itemCapture.url);
+              }
 
               await sleep(500);
             }
@@ -423,8 +475,8 @@ jobs:
             );
 
             console.log(
-              'SUCCESS: captured ' + childCount +
-              ' directly-downloadable Proton folder children without folder ZIP export.'
+              'SUCCESS: processed directly-downloadable Proton files from the folder; ' +
+              'nested folders remain for recursive traversal.'
             );
 
             await browser.close();
