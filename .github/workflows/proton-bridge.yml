@@ -240,50 +240,45 @@ jobs:
             await trigger.click({ timeout: 30000 });
             await sleep(600);
 
-            const candidates = await page.evaluate(() => {
-              const visible = (el) => {
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                return style.visibility !== 'hidden' &&
-                  style.display !== 'none' &&
-                  rect.width > 0 &&
-                  rect.height > 0;
-              };
+            const folderDownload = page.locator('[data-testid="download-button"]').filter({ visible: true }).first();
+            const scanDownload = page.locator('[data-testid="scan-download-button"]').filter({ visible: true }).first();
 
-              return [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"]')]
-                .map((el, index) => {
-                  const rect = el.getBoundingClientRect();
-                  const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
-                  const role = el.getAttribute('role') || '';
-                  const testid = el.getAttribute('data-testid') || '';
-                  const inMenu = role === 'menuitem' || !!el.closest('[role="menu"]');
-                  const matchesDownload = /download/i.test(text);
-                  let score = 0;
-                  if (matchesDownload) score += 30;
-                  if (inMenu) score += 100;
-                  if (rect.top < 350) score += 20;
-                  if (testid === 'dropdown-download-button') score -= 200;
-                  return { index, text, role, testid, top: Math.round(rect.top), score, visible: visible(el) };
-                })
-                .filter(item => item.visible && /download/i.test(item.text) && item.testid !== 'dropdown-download-button')
-                .sort((a, b) => b.score - a.score);
-            });
+            console.log('Folder Download action count:', await folderDownload.count());
+            console.log('Folder Scan & Download action count:', await scanDownload.count());
 
-            console.log('Folder Download menu candidates:', JSON.stringify(candidates.slice(0, 12)));
-
-            if (!candidates.length) {
-              throw new Error('No visible Download action appeared after opening the Proton folder menu.');
+            if (await folderDownload.count() === 0) {
+              throw new Error('Proton folder Download action was not found in the open menu.');
             }
 
-            const chosen = candidates[0];
-            console.log('Clicking folder download action:', JSON.stringify(chosen));
-            target = page.locator('button, a, [role="button"], [role="menuitem"]').nth(chosen.index);
+            target = folderDownload;
           } else {
             target = buttons.last();
           }
 
           console.log('Clicking Proton Download control...');
-          await target.click({ timeout: 30000 });
+
+          let browserDownload = null;
+          let browserDownloadError = null;
+
+          if (isFolderView) {
+            const downloadPromise = page.waitForEvent('download', { timeout: 180000 })
+              .then(download => ({ download }))
+              .catch(error => ({ error: String(error) }));
+
+            await target.click({ timeout: 30000 });
+
+            const result = await downloadPromise;
+            browserDownload = result.download || null;
+            browserDownloadError = result.error || null;
+
+            if (browserDownload) {
+              console.log('Browser download event captured:', browserDownload.suggestedFilename());
+            } else if (browserDownloadError) {
+              console.log('No browser download event captured; continuing with blob fallback:', browserDownloadError);
+            }
+          } else {
+            await target.click({ timeout: 30000 });
+          }
 
           let transferComplete = false;
           for (let i = 0; i < 180; i++) {
@@ -305,7 +300,10 @@ jobs:
             throw new Error('Proton did not report a completed download within the expected time.');
           }
 
-          const capture = await page.evaluate(async () => {
+          let capture = null;
+
+          if (!browserDownload) {
+            capture = await page.evaluate(async () => {
             const bridge = window.__protonBridge;
             if (!bridge) return { error: 'Bridge instrumentation is missing.' };
 
@@ -375,9 +373,27 @@ jobs:
               events: bridge.events.slice(-50),
               results
             };
-          });
+            });
+          }
 
-          console.log('Blob capture summary:', JSON.stringify({
+          if (browserDownload) {
+            const downloadPath = path.join(outputDir, await browserDownload.suggestedFilename());
+            await browserDownload.saveAs(downloadPath);
+            const bytes = await fs.promises.readFile(downloadPath);
+
+            capture = {
+              url: null,
+              name: await browserDownload.suggestedFilename(),
+              mime: 'application/zip',
+              size: bytes.length,
+              base64: bytes.toString('base64'),
+              events: []
+            };
+
+            console.log('Browser download saved:', downloadPath);
+          }
+
+          console.log('Blob/browser capture summary:', JSON.stringify({
             error: capture?.error,
             name: capture?.name,
             mime: capture?.mime,
