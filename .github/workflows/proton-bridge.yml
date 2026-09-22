@@ -406,73 +406,46 @@ jobs:
 
           if (browserDownload) {
             const suggestedName = await browserDownload.suggestedFilename();
-            const downloadUrl = await browserDownload.url();
 
             console.log(
               'Browser download event captured:',
-              suggestedName || '(unnamed)',
-              '| URL type:',
-              downloadUrl.startsWith('blob:') ? 'blob' : 'http'
+              suggestedName || '(unnamed)'
             );
 
-            let bytes = null;
-
-            // The browser download event gives us the actual payload URL.
-            // Prefer reading that payload directly over Playwright saveAs() or
-            // guessing Chromium's internal filesystem name.
-            if (downloadUrl.startsWith('blob:')) {
-              const payload = await page.evaluate(async (blobUrl) => {
-                const response = await fetch(blobUrl);
-                if (!response.ok) {
-                  throw new Error('Blob fetch failed: ' + response.status);
-                }
-                const buffer = await response.arrayBuffer();
-                const view = new Uint8Array(buffer);
-
-                let binary = '';
-                const chunkSize = 0x8000;
-                for (let i = 0; i < view.length; i += chunkSize) {
-                  binary += String.fromCharCode(...view.subarray(i, i + chunkSize));
-                }
-
-                return {
-                  mime: response.headers.get('content-type') || 'application/octet-stream',
-                  base64: btoa(binary)
-                };
-              }, downloadUrl);
-
-              bytes = Buffer.from(payload.base64, 'base64');
-              console.log('Downloaded payload read from blob URL:', bytes.length, 'bytes');
-            } else {
-              const response = await context.request.get(downloadUrl, {
-                timeout: 420000,
-                failOnStatusCode: false
-              });
-
-              const status = response.status();
-              console.log('Downloaded payload HTTP status:', status);
-
-              if (status < 200 || status >= 300) {
-                throw new Error('Proton download URL returned HTTP ' + status);
-              }
-
-              bytes = await response.body();
-              console.log('Downloaded payload read through browser-context request:', bytes.length, 'bytes');
+            // Playwright exposes the actual downloaded payload as a readable stream.
+            // Use that stream directly instead of re-requesting the download URL or
+            // relying on Playwright's saveAs()/filesystem bookkeeping.
+            const stream = await browserDownload.createReadStream();
+            if (!stream) {
+              throw new Error('Playwright did not provide a readable Proton download stream.');
             }
 
-            if (!bytes || bytes.length < 4) {
-              throw new Error('Proton download payload is empty or too small.');
+            const chunks = [];
+            for await (const chunk of stream) {
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            }
+
+            const bytes = Buffer.concat(chunks);
+            console.log('Read Proton download stream:', bytes.length, 'bytes');
+
+            if (!bytes.length) {
+              throw new Error('Proton download stream was empty.');
             }
 
             const hasZipMagic =
+              bytes.length >= 4 &&
               bytes[0] === 0x50 &&
               bytes[1] === 0x4b &&
               bytes[2] === 0x03 &&
               bytes[3] === 0x04;
 
             if (isFolderView && !hasZipMagic) {
+              console.log(
+                'Proton folder stream first bytes:',
+                bytes.subarray(0, Math.min(bytes.length, 32)).toString('hex')
+              );
               throw new Error(
-                'Proton reported a folder download, but the browser download payload is not a ZIP archive.'
+                'Proton reported a folder download, but the actual Playwright download stream is not a ZIP archive.'
               );
             }
 
@@ -496,15 +469,18 @@ jobs:
                 await fs.promises.rm(validationPath, { force: true });
               }
 
-              console.log('Proton folder payload passed ZIP integrity validation.');
+              console.log('Proton folder stream passed ZIP integrity validation.');
             }
 
-            const outputName = suggestedName || (isFolderView ? 'Proton Drive Download.zip' : 'proton-download.bin');
+            const outputName =
+              suggestedName ||
+              (isFolderView ? 'Proton Drive Download.zip' : 'proton-download.bin');
+
             const stablePath = path.join(outputDir, outputName);
             await fs.promises.writeFile(stablePath, bytes);
 
             capture = {
-              url: downloadUrl,
+              url: await browserDownload.url(),
               name: outputName,
               mime: isFolderView ? 'application/zip' : 'application/octet-stream',
               size: bytes.length,
@@ -512,7 +488,7 @@ jobs:
               events: []
             };
 
-            console.log('Proton download payload saved:', stablePath);
+            console.log('Proton download stream saved:', stablePath);
           }
 
           console.log('Blob/browser capture summary:', JSON.stringify({
