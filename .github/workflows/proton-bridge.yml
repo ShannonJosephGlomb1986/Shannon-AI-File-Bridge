@@ -273,7 +273,7 @@ jobs:
           ).then(() => ({ type: 'ui' })).catch(error => ({ type: 'error', error: String(error) }));
 
           if (isFolderView) {
-            browserDownloadResult = page.waitForEvent('download', { timeout: 300000 })
+            browserDownloadResult = page.waitForEvent('download', { timeout: 420000 })
               .then(download => ({ type: 'download', download }))
               .catch(error => ({ type: 'error', error: String(error) }));
           }
@@ -281,8 +281,12 @@ jobs:
           console.log('Clicking Proton Download control...');
           await target.click({ timeout: 30000 });
 
-          const signals = [blobReadyResult, transferUiResult];
-          if (browserDownloadResult) signals.push(browserDownloadResult);
+          // Folder downloads must use the browser download event.
+          // Proton creates unrelated thumbnail blobs on the folder page;
+          // treating those as the folder archive produces a fake .zip (often JPEG data).
+          const signals = isFolderView
+            ? [browserDownloadResult]
+            : [blobReadyResult, transferUiResult];
 
           const firstSignal = await Promise.race(signals);
 
