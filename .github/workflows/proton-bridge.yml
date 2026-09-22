@@ -318,6 +318,12 @@ jobs:
 
           await sleep(1000);
 
+          if (isFolderView && !browserDownload) {
+            throw new Error(
+              'Proton folder download did not produce a browser download event; refusing thumbnail/blob fallback.'
+            );
+          }
+
           let capture = null;
 
           if (!browserDownload) {
