@@ -45,6 +45,10 @@
 
 The restricted computer uploads files into a single dedicated Proton Drive folder. The compatibility bridge downloads that shared folder as a ZIP when necessary, safely extracts it, preserves relative folder paths, verifies each file with SHA-256, and publishes individual files into the private Supabase vault. The Proton public link should normally use Viewer access because the bridge only needs to read/download the inbox.
 
+## Multi-provider transfer architecture
+
+The long-term goal is provider-to-provider transfer through Bridge HQ. A transfer is modeled as `source provider → bridge control plane → target provider`, with provider-specific adapters handling authentication and transport. Supabase remains the persistent registry/vault and Floot remains the control room. A source adapter does not automatically grant target-write permission: each target provider must have an explicit supported write connector and the bridge must verify the copied bytes before marking a transfer complete.
+
 ## Phase 4 — Floot file-control panel
 
 - [x] Connect Floot to Bridge HQ
@@ -55,6 +59,8 @@ The restricted computer uploads files into a single dedicated Proton Drive folde
 - [ ] Fully verify the user-facing download action
 - [ ] Show version/history information
 - [ ] Add safe file actions
+- [ ] Add provider-to-provider transfer jobs with explicit source/target authorization
+- [ ] Verify target bytes against source SHA-256 before completing a transfer
 
 ## Anchor integration
 
