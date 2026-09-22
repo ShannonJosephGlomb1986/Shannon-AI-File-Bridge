@@ -289,7 +289,8 @@ jobs:
                   const current = [...(window.__protonBridge?.blobUrls || [])];
                   return current.some((url) => !known.includes(url));
                 },
-                { arg: knownUrls, timeout: 180000 }
+                knownUrls,
+                { timeout: 180000 }
               ).catch((error) => ({ error: String(error) }));
 
               await childButton.click({ timeout: 30000 });
