@@ -406,83 +406,113 @@ jobs:
 
           if (browserDownload) {
             const suggestedName = await browserDownload.suggestedFilename();
+            const downloadUrl = await browserDownload.url();
 
-            console.log('Waiting for a completed ZIP to appear in the native download directory:', downloadDir);
+            console.log(
+              'Browser download event captured:',
+              suggestedName || '(unnamed)',
+              '| URL type:',
+              downloadUrl.startsWith('blob:') ? 'blob' : 'http'
+            );
 
-            const downloadDeadline = Date.now() + 420000;
-            let nativeDownload = null;
-            let nativeDownloadName = null;
             let bytes = null;
 
-            while (Date.now() < downloadDeadline) {
-              let entries = [];
-              try {
-                entries = await fs.promises.readdir(downloadDir, { withFileTypes: true });
-              } catch {}
+            // The browser download event gives us the actual payload URL.
+            // Prefer reading that payload directly over Playwright saveAs() or
+            // guessing Chromium's internal filesystem name.
+            if (downloadUrl.startsWith('blob:')) {
+              const payload = await page.evaluate(async (blobUrl) => {
+                const response = await fetch(blobUrl);
+                if (!response.ok) {
+                  throw new Error('Blob fetch failed: ' + response.status);
+                }
+                const buffer = await response.arrayBuffer();
+                const view = new Uint8Array(buffer);
 
-              for (const entry of entries) {
-                if (!entry.isFile()) continue;
-                if (entry.name.endsWith('.crdownload')) continue;
+                let binary = '';
+                const chunkSize = 0x8000;
+                for (let i = 0; i < view.length; i += chunkSize) {
+                  binary += String.fromCharCode(...view.subarray(i, i + chunkSize));
+                }
 
-                const candidatePath = path.join(downloadDir, entry.name);
+                return {
+                  mime: response.headers.get('content-type') || 'application/octet-stream',
+                  base64: btoa(binary)
+                };
+              }, downloadUrl);
 
-                try {
-                  const candidate = await fs.promises.readFile(candidatePath);
-                  if (candidate.length < 4) continue;
+              bytes = Buffer.from(payload.base64, 'base64');
+              console.log('Downloaded payload read from blob URL:', bytes.length, 'bytes');
+            } else {
+              const response = await context.request.get(downloadUrl, {
+                timeout: 420000,
+                failOnStatusCode: false
+              });
 
-                  const hasZipMagic =
-                    candidate[0] === 0x50 &&
-                    candidate[1] === 0x4b &&
-                    candidate[2] === 0x03 &&
-                    candidate[3] === 0x04;
+              const status = response.status();
+              console.log('Downloaded payload HTTP status:', status);
 
-                  if (!hasZipMagic) continue;
-
-                  const { execFileSync } = await import('node:child_process');
-                  execFileSync(
-                    'python3',
-                    ['-c', [
-                      'import sys, zipfile',
-                      'p=sys.argv[1]',
-                      'assert zipfile.is_zipfile(p)',
-                      'with zipfile.ZipFile(p) as z: z.testzip()',
-                    ].join(';'), candidatePath],
-                    { stdio: 'pipe' }
-                  );
-
-                  nativeDownload = candidatePath;
-                  nativeDownloadName = entry.name;
-                  bytes = candidate;
-                  break;
-                } catch {}
+              if (status < 200 || status >= 300) {
+                throw new Error('Proton download URL returned HTTP ' + status);
               }
 
-              if (nativeDownload) break;
-              await sleep(1000);
+              bytes = await response.body();
+              console.log('Downloaded payload read through browser-context request:', bytes.length, 'bytes');
             }
 
-            if (!nativeDownload || !bytes) {
+            if (!bytes || bytes.length < 4) {
+              throw new Error('Proton download payload is empty or too small.');
+            }
+
+            const hasZipMagic =
+              bytes[0] === 0x50 &&
+              bytes[1] === 0x4b &&
+              bytes[2] === 0x03 &&
+              bytes[3] === 0x04;
+
+            if (isFolderView && !hasZipMagic) {
               throw new Error(
-                'Proton browser download event fired, but no completed valid ZIP appeared in the native download directory within 7 minutes.'
+                'Proton reported a folder download, but the browser download payload is not a ZIP archive.'
               );
             }
 
-            const stableName = suggestedName || nativeDownloadName || 'Proton Drive Download.zip';
-            const stablePath = path.join(outputDir, stableName);
+            if (isFolderView) {
+              const { execFileSync } = await import('node:child_process');
+              const validationPath = path.join(outputDir, '.proton-download-validation.zip');
+              await fs.promises.writeFile(validationPath, bytes);
 
-            await fs.promises.copyFile(nativeDownload, stablePath);
+              try {
+                execFileSync(
+                  'python3',
+                  ['-c', [
+                    'import sys, zipfile',
+                    'p=sys.argv[1]',
+                    'assert zipfile.is_zipfile(p)',
+                    'with zipfile.ZipFile(p) as z: assert z.testzip() is None',
+                  ].join(';'), validationPath],
+                  { stdio: 'pipe' }
+                );
+              } finally {
+                await fs.promises.rm(validationPath, { force: true });
+              }
+
+              console.log('Proton folder payload passed ZIP integrity validation.');
+            }
+
+            const outputName = suggestedName || (isFolderView ? 'Proton Drive Download.zip' : 'proton-download.bin');
+            const stablePath = path.join(outputDir, outputName);
+            await fs.promises.writeFile(stablePath, bytes);
 
             capture = {
-              url: null,
-              name: stableName,
-              mime: 'application/zip',
+              url: downloadUrl,
+              name: outputName,
+              mime: isFolderView ? 'application/zip' : 'application/octet-stream',
               size: bytes.length,
               base64: bytes.toString('base64'),
               events: []
             };
 
-            console.log('Valid Proton folder ZIP found in native download directory:', nativeDownload);
-            console.log('Copied to:', stablePath);
+            console.log('Proton download payload saved:', stablePath);
           }
 
           console.log('Blob/browser capture summary:', JSON.stringify({
