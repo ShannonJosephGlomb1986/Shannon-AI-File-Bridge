@@ -223,8 +223,8 @@ jobs:
           }
 
           const isFolderView =
-            /(?:^|\\n)Uploaded by\\s*(?:\\n|$)/i.test(pageBody) &&
-            /(?:^|\\n)Size\\s*(?:\\n|$)/i.test(pageBody);
+            /(?:^|\n)Uploaded by\s*(?:\n|$)/i.test(pageBody) &&
+            /(?:^|\n)Size\s*(?:\n|$)/i.test(pageBody);
 
           console.log('Detected Proton source:', isFolderView ? 'folder' : 'single file');
 
@@ -253,7 +253,7 @@ jobs:
               return [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"]')]
                 .map((el, index) => {
                   const rect = el.getBoundingClientRect();
-                  const text = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+                  const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
                   const role = el.getAttribute('role') || '';
                   const testid = el.getAttribute('data-testid') || '';
                   const inMenu = role === 'menuitem' || !!el.closest('[role="menu"]');
@@ -289,7 +289,7 @@ jobs:
           for (let i = 0; i < 180; i++) {
             const body = await page.locator('body').innerText();
 
-            if (/\\b\\d+\\s+of\\s+\\d+\\s+transfers\\s+completed\\b/i.test(body) && /Downloaded/i.test(body)) {
+            if (/\b\d+\s+of\s+\d+\s+transfers\s+completed\b/i.test(body) && /Downloaded/i.test(body)) {
               transferComplete = true;
               console.log('Proton reports: transfer(s) completed and file downloaded.');
               break;
