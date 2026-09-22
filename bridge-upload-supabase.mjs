@@ -67,6 +67,31 @@ async function sha256File(filePath) {
   return { hash: hash.digest('hex'), size: data.length, data };
 }
 
+const STORAGE_ALLOWED = /^[A-Za-z0-9 _.,!*$@=;:+?()'\\-]+$/;
+
+function encodeStorageSegment(segment) {
+  let encoded = '';
+
+  for (const char of segment) {
+    if (char === '!') {
+      encoded += '!!';
+    } else if (STORAGE_ALLOWED.test(char)) {
+      encoded += char;
+    } else {
+      encoded += `!u${char.codePointAt(0).toString(16)}!`;
+    }
+  }
+
+  return encoded || '_';
+}
+
+function storageSafePath(sourcePath) {
+  return sourcePath
+    .split('/')
+    .map(encodeStorageSegment)
+    .join('/');
+}
+
 function storageObjectPath(storagePath) {
   return storagePath
     .split('/')
@@ -214,7 +239,7 @@ try {
     const localPath = path.join(OUTPUT_DIR, fileName);
     const { hash, size, data } = await sha256File(localPath);
     const normalizedPath = fileName.split(path.sep).join('/');
-    const storagePath = `proton/${normalizedPath}`;
+    const storagePath = `proton/${storageSafePath(normalizedPath)}`;
     const contentType = contentTypeFor(fileName);
 
     console.log(`Processing: ${fileName} (${size} bytes, sha256 ${hash})`);
