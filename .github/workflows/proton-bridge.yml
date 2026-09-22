@@ -55,8 +55,12 @@ jobs:
 
           if (!url) throw new Error('PROTON_SHARE_URL is missing');
 
+          const downloadDir = path.resolve('.proton-downloads');
+          fs.mkdirSync(downloadDir, { recursive: true });
+
           const browser = await chromium.launch({
             headless: true,
+            downloadsPath: downloadDir,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
           });
 
@@ -401,20 +405,69 @@ jobs:
           }
 
           if (browserDownload) {
-            const downloadPath = path.join(outputDir, await browserDownload.suggestedFilename());
-            await browserDownload.saveAs(downloadPath);
-            const bytes = await fs.promises.readFile(downloadPath);
+            const suggestedName = await browserDownload.suggestedFilename();
+            const downloadPath = path.join(downloadDir, suggestedName);
+
+            console.log('Waiting for the native download file to finish:', downloadPath);
+
+            const downloadDeadline = Date.now() + 420000;
+            let bytes = null;
+
+            while (Date.now() < downloadDeadline) {
+              try {
+                const stat = await fs.promises.stat(downloadPath);
+                if (stat.isFile() && stat.size > 0) {
+                  const candidate = await fs.promises.readFile(downloadPath);
+
+                  // A Proton folder export must be a real ZIP, not a thumbnail or
+                  // another unrelated browser blob. Only accept the file once the
+                  // ZIP central directory can be parsed successfully.
+                  const isZip =
+                    candidate.length >= 4 &&
+                    candidate[0] === 0x50 &&
+                    candidate[1] === 0x4b &&
+                    candidate[2] === 0x03 &&
+                    candidate[3] === 0x04;
+
+                  if (isZip) {
+                    try {
+                      const { execFileSync } = await import('node:child_process');
+                      execFileSync('python3', ['-c', [
+                        'import sys, zipfile',
+                        'p=sys.argv[1]',
+                        'assert zipfile.is_zipfile(p)',
+                        'with zipfile.ZipFile(p) as z: z.testzip()',
+                      ].join(';'), downloadPath, { stdio: 'pipe' });
+
+                      bytes = candidate;
+                      break;
+                    } catch {}
+                  }
+                }
+              } catch {}
+
+              await sleep(1000);
+            }
+
+            if (!bytes) {
+              throw new Error(
+                'Proton browser download started but did not produce a valid ZIP file in the download directory within 7 minutes.'
+              );
+            }
+
+            const stablePath = path.join(outputDir, suggestedName);
+            await fs.promises.copyFile(downloadPath, stablePath);
 
             capture = {
               url: null,
-              name: await browserDownload.suggestedFilename(),
+              name: suggestedName,
               mime: 'application/zip',
               size: bytes.length,
               base64: bytes.toString('base64'),
               events: []
             };
 
-            console.log('Browser download saved:', downloadPath);
+            console.log('Valid Proton folder ZIP saved:', stablePath);
           }
 
           console.log('Blob/browser capture summary:', JSON.stringify({
