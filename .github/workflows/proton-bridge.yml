@@ -300,9 +300,15 @@ jobs:
 
           await sleep(2000);
 
-          if (!transferComplete) {
+          if (!transferComplete && !browserDownload) {
             await page.screenshot({ path: path.join(outputDir, 'proton-transfer-timeout.png'), fullPage: true });
-            throw new Error('Proton did not report a completed download within the expected time.');
+            throw new Error('Proton did not provide a completed transfer signal or a browser download.');
+          }
+
+          if (browserDownload) {
+            console.log('Browser download is the authoritative transfer result for this run.');
+          } else {
+            console.log('Using Proton transfer-completed UI signal.');
           }
 
           let capture = null;
