@@ -8,6 +8,7 @@ on:
 jobs:
   proton-bridge:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -458,7 +459,8 @@ jobs:
           await browser.close();
           EOF
 
-          node bridge-download.mjs
+          echo "Starting Proton download watchdog (8 minutes)..."
+          timeout --signal=TERM --kill-after=20s 8m node bridge-download.mjs
 
       - name: Extract Proton folder archive when needed
         run: |
