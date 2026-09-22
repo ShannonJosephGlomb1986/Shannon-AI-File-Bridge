@@ -419,7 +419,7 @@ jobs:
             .trim();
 
           let finalName = safeName || 'proton-download.bin';
-          if (isFolderView && !/\\.zip$/i.test(finalName)) {
+          if (isFolderView && !/\.zip$/i.test(finalName)) {
             finalName = `${finalName}.zip`;
           }
 
