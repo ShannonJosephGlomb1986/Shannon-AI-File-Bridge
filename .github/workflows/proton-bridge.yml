@@ -406,68 +406,83 @@ jobs:
 
           if (browserDownload) {
             const suggestedName = await browserDownload.suggestedFilename();
-            const downloadPath = path.join(downloadDir, suggestedName);
 
-            console.log('Waiting for the native download file to finish:', downloadPath);
+            console.log('Waiting for a completed ZIP to appear in the native download directory:', downloadDir);
 
             const downloadDeadline = Date.now() + 420000;
+            let nativeDownload = null;
+            let nativeDownloadName = null;
             let bytes = null;
 
             while (Date.now() < downloadDeadline) {
+              let entries = [];
               try {
-                const stat = await fs.promises.stat(downloadPath);
-                if (stat.isFile() && stat.size > 0) {
-                  const candidate = await fs.promises.readFile(downloadPath);
+                entries = await fs.promises.readdir(downloadDir, { withFileTypes: true });
+              } catch {}
 
-                  // A Proton folder export must be a real ZIP, not a thumbnail or
-                  // another unrelated browser blob. Only accept the file once the
-                  // ZIP central directory can be parsed successfully.
-                  const isZip =
-                    candidate.length >= 4 &&
+              for (const entry of entries) {
+                if (!entry.isFile()) continue;
+                if (entry.name.endsWith('.crdownload')) continue;
+
+                const candidatePath = path.join(downloadDir, entry.name);
+
+                try {
+                  const candidate = await fs.promises.readFile(candidatePath);
+                  if (candidate.length < 4) continue;
+
+                  const hasZipMagic =
                     candidate[0] === 0x50 &&
                     candidate[1] === 0x4b &&
                     candidate[2] === 0x03 &&
                     candidate[3] === 0x04;
 
-                  if (isZip) {
-                    try {
-                      const { execFileSync } = await import('node:child_process');
-                      execFileSync('python3', ['-c', [
-                        'import sys, zipfile',
-                        'p=sys.argv[1]',
-                        'assert zipfile.is_zipfile(p)',
-                        'with zipfile.ZipFile(p) as z: z.testzip()',
-                      ].join(';'), downloadPath, { stdio: 'pipe' });
+                  if (!hasZipMagic) continue;
 
-                      bytes = candidate;
-                      break;
-                    } catch {}
-                  }
-                }
-              } catch {}
+                  const { execFileSync } = await import('node:child_process');
+                  execFileSync(
+                    'python3',
+                    ['-c', [
+                      'import sys, zipfile',
+                      'p=sys.argv[1]',
+                      'assert zipfile.is_zipfile(p)',
+                      'with zipfile.ZipFile(p) as z: z.testzip()',
+                    ].join(';'), candidatePath],
+                    { stdio: 'pipe' }
+                  );
 
+                  nativeDownload = candidatePath;
+                  nativeDownloadName = entry.name;
+                  bytes = candidate;
+                  break;
+                } catch {}
+              }
+
+              if (nativeDownload) break;
               await sleep(1000);
             }
 
-            if (!bytes) {
+            if (!nativeDownload || !bytes) {
               throw new Error(
-                'Proton browser download started but did not produce a valid ZIP file in the download directory within 7 minutes.'
+                'Proton browser download event fired, but no completed valid ZIP appeared in the native download directory within 7 minutes.'
               );
             }
 
-            const stablePath = path.join(outputDir, suggestedName);
-            await fs.promises.copyFile(downloadPath, stablePath);
+            const stableName = suggestedName || nativeDownloadName || 'Proton Drive Download.zip';
+            const stablePath = path.join(outputDir, stableName);
+
+            await fs.promises.copyFile(nativeDownload, stablePath);
 
             capture = {
               url: null,
-              name: suggestedName,
+              name: stableName,
               mime: 'application/zip',
               size: bytes.length,
               base64: bytes.toString('base64'),
               events: []
             };
 
-            console.log('Valid Proton folder ZIP saved:', stablePath);
+            console.log('Valid Proton folder ZIP found in native download directory:', nativeDownload);
+            console.log('Copied to:', stablePath);
           }
 
           console.log('Blob/browser capture summary:', JSON.stringify({
