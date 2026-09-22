@@ -31,6 +31,7 @@
 - [x] Add persistent Proton Drive CLI bridge-host foundation and read-only inventory probe
 - [ ] Provision the persistent bridge host and establish an authenticated Proton session
 - [ ] Capture and inspect a real Proton Drive JSON inventory
+- [x] Switch the working compatibility bridge to a dedicated Proton public-share folder inbox
 - [ ] List Proton Drive folders/files
 - [ ] Detect new and changed files
 - [ ] Preserve Proton folder paths in Supabase
@@ -39,6 +40,10 @@
 - [ ] Add integrity verification and retry handling
 
 > Proton now provides an official Proton Drive CLI for Windows, macOS and Linux. It supports browser-based authentication, folder/file listing, downloads, uploads, sharing, and JSON output for automation. The remaining infrastructure challenge for this project is obtaining a persistent authenticated bridge host because the current restricted computer does not provide a reliable command-line environment.
+
+## Phase 3A — Managed Proton Bridge Inbox
+
+The restricted computer uploads files into a single dedicated Proton Drive folder. The compatibility bridge downloads that shared folder as a ZIP when necessary, safely extracts it, preserves relative folder paths, verifies each file with SHA-256, and publishes individual files into the private Supabase vault. The Proton public link should normally use Viewer access because the bridge only needs to read/download the inbox.
 
 ## Phase 4 — Floot file-control panel
 
