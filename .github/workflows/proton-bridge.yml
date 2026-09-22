@@ -263,49 +263,51 @@ jobs:
           const blobReadyResult = page.waitForFunction(
             () => Boolean(window.__protonBridge?.blobUrls?.size),
             { timeout: 300000 }
-          ).then(() => ({ ready: true })).catch(error => ({ error: String(error) }));
+          ).then(() => ({ type: 'blob' })).catch(error => ({ type: 'error', error: String(error) }));
+
+          const transferUiResult = page.waitForFunction(
+            () => /\\b\\d+\\s+of\\s+\\d+\\s+transfers\\s+completed\\b/i.test(document.body?.innerText || '') &&
+              /Downloaded/i.test(document.body?.innerText || ''),
+            { timeout: 300000 }
+          ).then(() => ({ type: 'ui' })).catch(error => ({ type: 'error', error: String(error) }));
 
           if (isFolderView) {
             browserDownloadResult = page.waitForEvent('download', { timeout: 300000 })
-              .then(download => ({ download }))
-              .catch(error => ({ error: String(error) }));
+              .then(download => ({ type: 'download', download }))
+              .catch(error => ({ type: 'error', error: String(error) }));
+          }
 
-            await target.click({ timeout: 30000 });
+          console.log('Clicking Proton Download control...');
+          await target.click({ timeout: 30000 });
+
+          const signals = [blobReadyResult, transferUiResult];
+          if (browserDownloadResult) signals.push(browserDownloadResult);
+
+          const firstSignal = await Promise.race(signals);
+
+          if (firstSignal.type === 'download') {
+            browserDownload = firstSignal.download;
+            console.log('Browser download event captured:', browserDownload.suggestedFilename());
+          } else if (firstSignal.type === 'blob') {
+            console.log('Decrypted Proton blob detected.');
+          } else if (firstSignal.type === 'ui') {
+            console.log('Proton transfer-completed UI detected.');
           } else {
-            await target.click({ timeout: 30000 });
+            console.log('Initial Proton transfer signal failed:', firstSignal.error);
           }
 
-          let transferComplete = false;
-          let transferText = '';
-
-          for (let i = 0; i < 300; i++) {
-            const body = await page.locator('body').innerText();
-            transferText = body;
-
-            if (/\b\d+\s+of\s+\d+\s+transfers\s+completed\b/i.test(body) && /Downloaded/i.test(body)) {
-              transferComplete = true;
-              console.log('Proton reports: transfer(s) completed and file downloaded.');
-              break;
-            }
-
-            await sleep(1000);
-          }
-
-          if (isFolderView && browserDownloadResult) {
-            const result = await Promise.race([
-              browserDownloadResult,
+          if (!browserDownload && firstSignal.type === 'ui') {
+            const followUp = await Promise.race([
+              browserDownloadResult || Promise.resolve({ type: 'none' }),
               blobReadyResult,
-              sleep(5000).then(() => ({ error: 'no browser download or blob signal after the transfer window' }))
+              sleep(10000).then(() => ({ type: 'timeout' }))
             ]);
 
-            browserDownload = result.download || null;
-
-            if (browserDownload) {
-              console.log('Browser download event captured:', browserDownload.suggestedFilename());
-            } else if (result.ready) {
-              console.log('A decrypted Proton blob is available; using blob capture fallback.');
-            } else {
-              console.log('Browser/blob signal unavailable:', result.error);
+            if (followUp.type === 'download') {
+              browserDownload = followUp.download;
+              console.log('Browser download event captured after UI completion:', browserDownload.suggestedFilename());
+            } else if (followUp.type === 'blob') {
+              console.log('Decrypted Proton blob detected after UI completion.');
             }
           }
 
